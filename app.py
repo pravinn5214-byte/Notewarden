@@ -6,6 +6,9 @@ Main: chat with grounded answers; each answer has an expandable Sources panel.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
 from generate import FALLBACK_MESSAGE, OLLAMA_DEFAULT_MODEL, generate_answer

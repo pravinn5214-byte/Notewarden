@@ -11,6 +11,9 @@ message is returned.
 """
 import os
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import requests
 
 FALLBACK_MESSAGE = "I couldn't find that in your notes."
