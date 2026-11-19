@@ -1,0 +1,12 @@
+[
+  {"question": "What does second normal form require?", "expected_source": "sample_notes.pdf", "expected_page": 1},
+  {"question": "What is the strongest isolation level?", "expected_source": "sample_notes.pdf", "expected_page": 2},
+  {"question": "Which index type answers range queries?", "expected_source": "sample_notes.pdf", "expected_page": 3},
+  {"question": "What does a covering index avoid?", "expected_source": "sample_notes.pdf", "expected_page": 3},
+  {"question": "How does the TCP three-way handshake work?", "expected_source": "sample_notes.pdf", "expected_page": 4},
+  {"question": "What does durability guarantee?", "expected_source": "sample_notes.pdf", "expected_page": 2},
+  {"question": "Why can a table have only one clustered index?", "expected_source": "sample_notes.pdf", "expected_page": 3},
+  {"question": "What transport protocol does HTTP/3 use?", "expected_source": "sample_notes.pdf", "expected_page": 4},
+  {"question": "What does 1NF say about table cells?", "expected_source": "sample_notes.pdf", "expected_page": 1},
+  {"question": "What is atomicity in transactions?", "expected_source": "sample_notes.pdf", "expected_page": 2}
+]
