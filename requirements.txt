@@ -1,6 +1,8 @@
 pypdf
+pymupdf
 sentence-transformers
 chromadb
 streamlit
 requests
 python-dotenv
+rank-bm25

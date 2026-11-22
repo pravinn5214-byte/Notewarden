@@ -7,3 +7,7 @@ venv/
 # App artifacts / generated data
 .st.log
 chroma_db/
+eval_chroma_db*/
+eval_results.md
+.pytest_cache/
+eval_chroma_db*/

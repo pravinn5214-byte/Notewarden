@@ -13,7 +13,7 @@ import streamlit as st
 
 from generate import FALLBACK_MESSAGE, OLLAMA_DEFAULT_MODEL, generate_answer
 from ingest import ingest_pdfs
-from retrieve import retrieve
+from retrieve import DEFAULT_MODE, MODES, invalidate_bm25_cache, retrieve
 
 DOCS_DIR = Path("docs")
 DB_DIR = "chroma_db"
@@ -67,6 +67,7 @@ with st.sidebar:
             with st.spinner("Updating index..."):
                 try:
                     ingest_pdfs()  # drops the deleted file's chunks
+                    invalidate_bm25_cache()
                     st.success(f"Deleted {pdf.name}")
                 except FileNotFoundError:
                     pass  # nothing left to index
@@ -76,8 +77,18 @@ with st.sidebar:
 
     st.divider()
 
-    chunk_size = st.slider("Chunk size (words)", 100, 1000, 300, step=50)
+    chunk_size = st.slider("Child chunk size (words)", 80, 300, 120, step=20)
+    parent_size = st.slider("Parent chunk size (words)", 200, 1000, 500, step=50)
     top_k = st.slider("Top-k chunks to retrieve", 1, 10, 4)
+    mode = st.selectbox(
+        "Retrieval mode",
+        MODES,
+        index=MODES.index(os.environ.get("RETRIEVAL_MODE", DEFAULT_MODE))
+        if os.environ.get("RETRIEVAL_MODE", DEFAULT_MODE) in MODES else MODES.index(DEFAULT_MODE),
+        help="dense = embeddings only (baseline) · hybrid = dense + BM25 keyword "
+             "search fused with RRF · hybrid_rerank = hybrid + cross-encoder "
+             "re-ranking (answers use the larger parent chunk)",
+    )
 
     if st.button("🗑️ Process documents", use_container_width=True):
         if not selected:
@@ -91,9 +102,13 @@ with st.sidebar:
                     state[0] = min(0.95, state[0] + 0.15)
                     progress.progress(state[0], text=status)
 
-                files, total = ingest_pdfs(chunk_size=chunk_size, progress_cb=cb, files=selected)
+                files, total = ingest_pdfs(
+                    child_size=chunk_size, parent_size=parent_size,
+                    progress_cb=cb, files=selected,
+                )
+                invalidate_bm25_cache()
                 progress.progress(1.0, text=f"Done: {files} file(s), {total} chunks")
-                st.success(f"Indexed {files} file(s) → {total} chunks.")
+                st.success(f"Indexed {files} file(s) → {total} child chunks.")
                 st.info("If you changed chunk size, re-run processing to rebuild "
                         "the index with the new setting.")
             except Exception as exc:
@@ -131,14 +146,17 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
         try:
             # Retrieve deeper than k, then keep only chunks from the files
             # currently ticked, so answers only draw on the selection.
-            hits = retrieve(question, k=top_k * 4)
+            hits = retrieve(
+                question, k=top_k * 4, mode=mode,
+                allowed_sources=[p.name for p in selected],
+            )
             allowed = {p.name for p in selected}
             hits = [h for h in hits if h["source"] in allowed][:top_k]
         except RuntimeError as exc:  # missing/empty store
             st.error(str(exc))
             st.stop()
 
-        with st.spinner("Thinking..."):
+        with st.spinner("Thinking..." if mode == "dense" else "Re-ranking & thinking..."):
             try:
                 answer = generate_answer(question, hits)
             except RuntimeError as exc:  # missing key, Ollama down, API error
@@ -148,7 +166,13 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
         st.markdown(answer)
         with st.expander("Sources"):
             for s in hits:
-                st.markdown(f"**{s['source']}** — page {s['page']} — score `{s['score']:.2f}`")
+                parts = [f"**{s['source']}** — page {s['page']}",
+                         f"dense `{s.get('dense_score', float('nan')):.2f}`"]
+                if "bm25_rank" in s:
+                    parts.append(f"BM25 rank {s['bm25_rank']}")
+                if "rerank_score" in s:
+                    parts.append(f"rerank `{s['rerank_score']:.2f}`")
+                st.markdown(" | ".join(parts))
                 st.text(s["text"][:600] + ("..." if len(s["text"]) > 600 else ""))
 
     st.session_state.messages.append(

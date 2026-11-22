@@ -1,12 +1,272 @@
 [
-  {"question": "What does second normal form require?", "expected_source": "sample_notes.pdf", "expected_page": 1},
-  {"question": "What is the strongest isolation level?", "expected_source": "sample_notes.pdf", "expected_page": 2},
-  {"question": "Which index type answers range queries?", "expected_source": "sample_notes.pdf", "expected_page": 3},
-  {"question": "What does a covering index avoid?", "expected_source": "sample_notes.pdf", "expected_page": 3},
-  {"question": "How does the TCP three-way handshake work?", "expected_source": "sample_notes.pdf", "expected_page": 4},
-  {"question": "What does durability guarantee?", "expected_source": "sample_notes.pdf", "expected_page": 2},
-  {"question": "Why can a table have only one clustered index?", "expected_source": "sample_notes.pdf", "expected_page": 3},
-  {"question": "What transport protocol does HTTP/3 use?", "expected_source": "sample_notes.pdf", "expected_page": 4},
-  {"question": "What does 1NF say about table cells?", "expected_source": "sample_notes.pdf", "expected_page": 1},
-  {"question": "What is atomicity in transactions?", "expected_source": "sample_notes.pdf", "expected_page": 2}
+  {
+    "question": "How are phi (\u03c6) and psi (\u03c8) torsion angles defined in a dipeptide?",
+    "expected_source": "170.pdf",
+    "expected_page": 1,
+    "tag": "semantic"
+  },
+  {
+    "question": "Which helix of a leucine zipper directly contacts DNA?",
+    "expected_source": "170.pdf",
+    "expected_page": 2,
+    "tag": "semantic"
+  },
+  {
+    "question": "How many hydrogen bonds does a guanine-cytosine base pair have?",
+    "expected_source": "170.pdf",
+    "expected_page": 3,
+    "tag": "semantic"
+  },
+  {
+    "question": "What stabilizes a stem-loop structure?",
+    "expected_source": "170.pdf",
+    "expected_page": 4,
+    "tag": "semantic"
+  },
+  {
+    "question": "What role do hydrophobic interactions play in protein folding?",
+    "expected_source": "170.pdf",
+    "expected_page": 5,
+    "tag": "semantic"
+  },
+  {
+    "question": "Describe the structural organization of the GroEL chaperone.",
+    "expected_source": "170.pdf",
+    "expected_page": 6,
+    "tag": "semantic"
+  },
+  {
+    "question": "What glycosidic bond joins the two glucose molecules in maltose?",
+    "expected_source": "170.pdf",
+    "expected_page": 7,
+    "tag": "keyword"
+  },
+  {
+    "question": "How does a disaccharide differ from a dipeptide in its bond type?",
+    "expected_source": "170.pdf",
+    "expected_page": 8,
+    "tag": "keyword"
+  },
+  {
+    "question": "Why are polysaccharides more complex than simple polymers?",
+    "expected_source": "170.pdf",
+    "expected_page": 9,
+    "tag": "semantic"
+  },
+  {
+    "question": "What conditions favour the formation of an i-motif?",
+    "expected_source": "170.pdf",
+    "expected_page": 11,
+    "tag": "keyword"
+  },
+  {
+    "question": "Name one sequence motif associated with the Rossmann fold.",
+    "expected_source": "170.pdf",
+    "expected_page": 13,
+    "tag": "keyword"
+  },
+  {
+    "question": "Why is DNA chemically more stable than RNA?",
+    "expected_source": "170.pdf",
+    "expected_page": 16,
+    "tag": "semantic"
+  },
+  {
+    "question": "What does a Ramachandran plot represent?",
+    "expected_source": "170.pdf",
+    "expected_page": 18,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which enzyme removes glucose residues from glycogen?",
+    "expected_source": "170.pdf",
+    "expected_page": 22,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which protein produced by silkworms is rich in beta-sheets?",
+    "expected_source": "170.pdf",
+    "expected_page": 27,
+    "tag": "keyword"
+  },
+  {
+    "question": "How does a pseudoknot form in RNA?",
+    "expected_source": "170.pdf",
+    "expected_page": 37,
+    "tag": "keyword"
+  },
+  {
+    "question": "What factors influence Z-DNA formation?",
+    "expected_source": "170.pdf",
+    "expected_page": 38,
+    "tag": "semantic"
+  },
+  {
+    "question": "What example DNA sequence illustrates a G-quadruplex?",
+    "expected_source": "170.pdf",
+    "expected_page": 43,
+    "tag": "keyword"
+  },
+  {
+    "question": "Name the four types of core histones.",
+    "expected_source": "170.pdf",
+    "expected_page": 46,
+    "tag": "keyword"
+  },
+  {
+    "question": "What does a chromatosome consist of?",
+    "expected_source": "170.pdf",
+    "expected_page": 47,
+    "tag": "keyword"
+  },
+  {
+    "question": "Where is the decoding centre of the ribosome located in prokaryotes?",
+    "expected_source": "170.pdf",
+    "expected_page": 48,
+    "tag": "semantic"
+  },
+  {
+    "question": "How many base pairs of DNA wrap around a histone octamer?",
+    "expected_source": "170.pdf",
+    "expected_page": 31,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which nucleoside is formed when adenine is combined with ribose?",
+    "expected_source": "170.pdf",
+    "expected_page": 35,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which DNA groove is wider and more accessible to binding molecules?",
+    "expected_source": "170.pdf",
+    "expected_page": 41,
+    "tag": "semantic"
+  },
+  {
+    "question": "Where in the genome do G-quadruplexes commonly occur?",
+    "expected_source": "170.pdf",
+    "expected_page": 44,
+    "tag": "semantic"
+  },
+  {
+    "question": "What does the anticodon of tRNA recognize?",
+    "expected_source": "170.pdf",
+    "expected_page": 29,
+    "tag": "semantic"
+  },
+  {
+    "question": "What does the CCA terminus of tRNA attach?",
+    "expected_source": "170.pdf",
+    "expected_page": 29,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which CRM phase covers the marketing suite and omni-channel growth engine?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 4,
+    "tag": "semantic"
+  },
+  {
+    "question": "What numbering pattern does automatic invoice generation use?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 3,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which tab of the configuration centre sets company name and timezone?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 2,
+    "tag": "semantic"
+  },
+  {
+    "question": "What is the objective of Phase 6 in the Tagverse CRM roadmap?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 5,
+    "tag": "semantic"
+  },
+  {
+    "question": "What GST information appears on Tagverse invoices?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 3,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which phase of the white-label CRM handles invoicing and billing?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 3,
+    "tag": "semantic"
+  },
+  {
+    "question": "What is the current status of the marketing command centre phase?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 4,
+    "tag": "semantic"
+  },
+  {
+    "question": "What instant chat workflows are planned in the advanced automations phase?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 5,
+    "tag": "semantic"
+  },
+  {
+    "question": "Which authentication system backs persistent session cookies in Tagverse?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 1,
+    "tag": "keyword"
+  },
+  {
+    "question": "What Firebase RTDB pattern scopes workspace data?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 1,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which OAuth providers are handled by the marketing ad infrastructure?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 4,
+    "tag": "keyword"
+  },
+  {
+    "question": "What encryption protects stored ad access tokens?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 4,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which metrics are synced from Google Ads and Meta campaigns?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 4,
+    "tag": "keyword"
+  },
+  {
+    "question": "What library generates PDF documents client-side?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 3,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which payment gateway handles credit card checkouts?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 3,
+    "tag": "keyword"
+  },
+  {
+    "question": "Which LLM powers the Tagverse AI co-pilot chat interface?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 5,
+    "tag": "keyword"
+  },
+  {
+    "question": "How many unit tests does the Vitest suite run in the final audit?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 5,
+    "tag": "keyword"
+  },
+  {
+    "question": "What are the four RBAC permission roles in the CRM?",
+    "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf",
+    "expected_page": 2,
+    "tag": "keyword"
+  }
 ]

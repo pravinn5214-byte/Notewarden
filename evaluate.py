@@ -1,30 +1,46 @@
-"""Retrieval evaluation: hit rate@k and MRR across chunk sizes.
+"""Retrieval evaluation: hit rate@k and MRR across retrieval modes with
+per-tag breakdowns and bootstrap confidence intervals.
 
 Reads eval_questions.json, where each item has:
     question        - the query
     expected_source - file name the answer should come from
     expected_page   - page number the answer should come from
+    tag             - "keyword" (exact terms) or "semantic" (paraphrase)
 
-For each chunk size in CHUNK_SIZES it rebuilds the index, retrieves the
-top-k chunks for every question, and checks whether any chunk matches the
-expected (source, page). It then prints a comparison table.
+For each child chunk size it builds an index in eval_chroma_db_<size>/
+(your app index is untouched), runs every question in every mode at k=3 and
+k=5, then reports:
+  - overall hit rate@k / MRR per mode, with bootstrap 95% CIs (1000 resamples)
+  - the same split by tag, so keyword vs semantic strengths are visible
+  - a parent-child ablation (see ablation.py) when run with --ablation
+
+CIs: differences are only meaningful when their intervals don't overlap;
+otherwise the result is marked "not significant".
 
 Usage:
-    python evaluate.py            # default: sizes 300, 500, 800
-    python evaluate.py 300 500    # custom sizes
+    python evaluate.py                # default child size
+    python evaluate.py 120 300        # multiple sizes
+    python evaluate.py --ablation     # add the parent-child ablation
+
+Results are saved to eval_results.md.
 """
 import json
+import random
+import sys
+from datetime import datetime
 from pathlib import Path
 
-from retrieve import retrieve
-
-from ingest import ingest_pdfs
+from ingest import CHILD_SIZE, ingest_pdfs
+from retrieve import MODES, retrieve
 
 EVAL_FILE = Path("eval_questions.json")
+RESULTS_FILE = Path("eval_results.md")
 DB_DIR = "eval_chroma_db"  # separate store so the app's index is untouched
-CHUNK_SIZES = [300, 500, 800]
-OVERLAP_RATIO = 50 / 300  # keep the same overlap ratio as the default settings
-TOP_K = 10  # retrieve deep enough for stable MRR; report @k and MRR from this
+KS = [3, 5]
+OVERLAP = 20  # child overlap
+BOOTSTRAP_N = 1000
+BOOTSTRAP_SEED = 42
+TAGS = ("keyword", "semantic")
 
 
 def load_questions(path: Path = EVAL_FILE) -> list[dict]:
@@ -40,53 +56,94 @@ def hit_and_rank(hits: list[dict], source: str, page: int) -> int | None:
     return None
 
 
-def evaluate_size(questions: list[dict], chunk_size: int, k: int = TOP_K) -> dict:
-    """Ingest at one chunk size and score all questions. Returns the metrics."""
-    overlap = max(1, round(chunk_size * OVERLAP_RATIO))
-    ingest_pdfs(db_dir=DB_DIR, chunk_size=chunk_size, overlap=overlap)
+def bootstrap_ci(values: list[float], n: int = BOOTSTRAP_N, seed: int = BOOTSTRAP_SEED) -> tuple[float, float]:
+    """95% CI of the mean via bootstrap resampling."""
+    if not values:
+        return (0.0, 0.0)
+    rng = random.Random(seed)
+    means = []
+    for _ in range(n):
+        sample = [rng.choice(values) for _ in range(len(values))]
+        means.append(sum(sample) / len(sample))
+    means.sort()
+    lo = means[int(0.025 * n)]
+    hi = means[int(0.975 * n) - 1]
+    return lo, hi
 
-    hits_total = 0
-    reciprocal_ranks: list[float] = []
-    per_question: list[tuple[str, int | None]] = []
+
+def fmt_metric(values: list[float]) -> str:
+    """'0.667 [0.52-0.79]' — mean with 95% bootstrap CI."""
+    if not values:
+        return "n/a"
+    m = sum(values) / len(values)
+    lo, hi = bootstrap_ci(values)
+    return f"{m:.3f} [{lo:.2f}-{hi:.2f}]"
+
+
+def evaluate_mode(questions: list[dict], mode: str, k: int, db_dir: str) -> dict[str, list[float]]:
+    """Per-question 1/rank values, overall and per tag. Returns a dict with
+    keys 'overall', 'keyword', 'semantic' mapping to lists of reciprocal
+    ranks (0.0 = miss)."""
+    out: dict[str, list[float]] = {t: [] for t in TAGS}
+    out["overall"] = []
     for q in questions:
-        results = retrieve(q["question"], k=k, db_dir=DB_DIR)
+        results = retrieve(q["question"], k=k, db_dir=db_dir, mode=mode)
         rank = hit_and_rank(results, q["expected_source"], q["expected_page"])
-        if rank is not None:
-            hits_total += 1
-            reciprocal_ranks.append(1 / rank)
-        else:
-            reciprocal_ranks.append(0.0)
-        per_question.append((q["question"], rank))
-
-    n = len(questions)
-    return {
-        "chunk_size": chunk_size,
-        "hit_rate@k": hits_total / n,
-        "mrr": sum(reciprocal_ranks) / n,
-        "per_question": per_question,
-        "k": k,
-    }
+        rr = 1 / rank if rank is not None else 0.0
+        out["overall"].append(rr)
+        out[q["tag"]].append(rr)
+    return out
 
 
 def main() -> None:
-    sizes = [int(a) for a in __import__("sys").argv[1:]] or CHUNK_SIZES
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    ablation = "--ablation" in sys.argv
+    sizes = [int(a) for a in args] or [CHILD_SIZE]
     questions = load_questions()
-    print(f"{len(questions)} questions, top-{TOP_K} retrieval\n")
+    print(f"{len(questions)} questions ({sum(1 for q in questions if q['tag']=='keyword')} keyword / "
+          f"{sum(1 for q in questions if q['tag']=='semantic')} semantic), modes: {', '.join(MODES)}, k: {KS}\n")
 
-    results = [evaluate_size(questions, size) for size in sizes]
+    tables: list[str] = []
+    for child_size in sizes:
+        db_dir = f"{DB_DIR}_{child_size}"
+        print(f"Ingesting at child size {child_size} into {db_dir}/ ...")
+        ingest_pdfs(child_size=child_size, child_overlap=OVERLAP, db_dir=db_dir)
 
-    # Comparison table
-    print(f"{'chunk size':>10} | {'hit rate@k':>10} | {'MRR':>6}")
-    print("-" * 34)
-    for r in results:
-        print(f"{r['chunk_size']:>10} | {r['hit_rate@k']:>10.2%} | {r['mrr']:>6.3f}")
+        rows: list[tuple[str, int, dict[str, list[float]]]] = []
+        for mode in MODES:
+            for k in KS:
+                rr = evaluate_mode(questions, mode, k, db_dir)
+                rows.append((mode, k, rr))
+                print(f"  {mode:>14} k={k}: overall={fmt_metric(rr['overall'])}")
 
-    # Per-question detail for the best size (by MRR)
-    best = max(results, key=lambda r: r["mrr"])
-    print(f"\nPer-question ranks at chunk size {best['chunk_size']} "
-          f"(None = not found in top-{best['k']}):")
-    for question, rank in best["per_question"]:
-        print(f"  rank {str(rank):>4}  {question}")
+        md = [
+            f"## Mode comparison — child size {child_size}",
+            "",
+            "Values: mean [bootstrap 95% CI]. CI overlap ⇒ not significant.",
+            "",
+            "| mode | k | overall hit/MRR | keyword | semantic |",
+            "|---|---|---|---|---|",
+        ]
+        for mode, k, rr in rows:
+            md.append(f"| {mode} | {k} | {fmt_metric(rr['overall'])} | "
+                      f"{fmt_metric(rr['keyword'])} | {fmt_metric(rr['semantic'])} |")
+        tables.append("\n".join(md))
+
+    if ablation:
+        import ablation
+        tables.append(ablation.run(questions))
+
+    header = [
+        "# Retrieval evaluation results",
+        "",
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
+        f"{len(questions)} questions · extractor: PyMuPDF + clean_text · "
+        f"child overlap {OVERLAP} · RRF k=60 · reranker: ms-marco-MiniLM-L-6-v2 · "
+        f"{BOOTSTRAP_N} bootstrap resamples (seed {BOOTSTRAP_SEED})",
+        "",
+    ]
+    RESULTS_FILE.write_text("\n".join(header) + "\n\n".join(tables) + "\n", encoding="utf-8")
+    print(f"\nSaved to {RESULTS_FILE}")
 
 
 if __name__ == "__main__":

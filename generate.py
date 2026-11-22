@@ -102,12 +102,19 @@ def _call_ollama(prompt: str) -> str:
 def generate_answer(question: str, chunks: list[dict], min_score: float = MIN_SCORE) -> str:
     """Return a grounded answer with citations, or the fallback message.
 
+    The gate uses "dense_score" (cosine similarity, present in every result
+    from retrieve()) rather than "score": MIN_SCORE is calibrated for cosine
+    similarity (0..1), while hybrid's RRF scores (~0.03 max) and the
+    cross-encoder's scores (often negative) live on different scales and
+    would trip a cosine threshold incorrectly.
+
     Raises RuntimeError with a user-actionable message on provider problems
     (missing key, API error, Ollama down).
     """
     if not chunks:
         return FALLBACK_MESSAGE
-    if chunks[0]["score"] < min_score:
+    dense_score = chunks[0].get("dense_score", chunks[0]["score"])
+    if dense_score < min_score:
         return FALLBACK_MESSAGE  # best match is too weak - don't ask the LLM
 
     provider = os.environ.get("LLM_PROVIDER", "claude").lower()
