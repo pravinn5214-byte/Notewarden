@@ -15,9 +15,30 @@ from generate import FALLBACK_MESSAGE, OLLAMA_DEFAULT_MODEL, generate_answer
 from ingest import IMAGE_EXTENSIONS, ingest_pdfs
 from ocr import is_tesseract_available
 from retrieve import DEFAULT_MODE, MODES, invalidate_bm25_cache, retrieve
+from store import (  # noqa: F401  (re-exported for callers/tests)
+    IndexCorruptError, LockHeldError, acquire_write_lock, db_path,
+    get_client, get_collections, health_check, release_write_lock,
+    reset_client, with_index_recovery,
+)
 
 DOCS_DIR = Path("docs")
-DB_DIR = "chroma_db"
+DB_DIR = db_path()  # CHROMA_DIR env var, default chroma_db/
+
+
+@st.cache_resource
+def _cached_collections(db_dir: str):
+    """Streamlit-cached handle on the two collections.
+
+    Cleared (st.cache_resource.clear(), via _refresh_collections) after every
+    write so the next read reopens through store.get_client() and never holds
+    a stale HNSW segment.
+    """
+    return get_collections(db_dir)
+
+
+def _refresh_collections() -> None:
+    st.cache_resource.clear()
+    reset_client()
 
 
 def check_store_ready() -> list[str]:
@@ -26,9 +47,14 @@ def check_store_ready() -> list[str]:
                                      + [p for ext in IMAGE_EXTENSIONS for p in DOCS_DIR.glob(ext)]):
         return ["No PDFs or images yet. Upload your notes in the sidebar, then click "
                 "**Process documents**."]
-    import chromadb
     try:
-        count = chromadb.PersistentClient(path=DB_DIR).get_collection("notes").count()
+        health_check()
+    except Exception:
+        return ["The index looks out of sync. Click **Repair index** in the "
+                "sidebar."]
+    try:
+        client = get_client()
+        count = with_index_recovery(lambda: client.get_collection("notes").count())
     except Exception:
         return ["Documents aren't indexed yet. Click **Process documents** in the "
                 "sidebar."]
@@ -78,7 +104,10 @@ with st.sidebar:
                 try:
                     ingest_pdfs()  # drops the deleted file's chunks
                     invalidate_bm25_cache()
+                    _refresh_collections()
                     st.success(f"Deleted {doc_path.name}")
+                except LockHeldError:
+                    st.warning("The app (or another ingest) is running; stop it first.")
                 except FileNotFoundError:
                     pass  # nothing left to index
             st.rerun()
@@ -127,6 +156,9 @@ with st.sidebar:
              "search fused with RRF · hybrid_rerank = hybrid + cross-encoder "
              "re-ranking (answers use the larger parent chunk)",
     )
+    if mode == "dense":
+        st.caption("Dense mode can miss one topic in multi-topic questions. "
+                   "Hybrid is recommended.")
 
     if st.button("🗑️ Process documents", use_container_width=True):
         if not selected:
@@ -151,9 +183,49 @@ with st.sidebar:
                 st.success(f"Indexed {files} file(s) → {total} child chunks.")
                 st.info("If you changed chunk size, re-run processing to rebuild "
                         "the index with the new setting.")
+            except LockHeldError:
+                progress.empty()
+                st.warning("The app (or another ingest) is running; stop it first.")
+            except IndexCorruptError:
+                progress.empty()
+                st.error("The index looks out of sync. Click **Repair index** in the sidebar.")
             except Exception as exc:
                 progress.empty()
                 st.error(f"Ingestion failed: {exc}")
+            else:
+                invalidate_bm25_cache()
+                _refresh_collections()
+
+    st.divider()
+
+    if st.button("🛠️ Repair index", use_container_width=True,
+                 help="Deletes and rebuilds both collections from docs/ (OCR cache is reused, scanned pages are not re-OCR'd)"):
+        with st.spinner("Rebuilding index from docs/..."):
+            try:
+                lock = acquire_write_lock()
+            except LockHeldError:
+                st.warning("The app (or another ingest) is running; stop it first.")
+            else:
+                try:
+                    client = get_client()
+                    for name in ("notes", "parents"):
+                        try:
+                            with_index_recovery(lambda n=name: client.delete_collection(n))
+                        except Exception:
+                            pass  # collection didn't exist yet
+                    reset_client()
+                    files, total = ingest_pdfs(use_ocr=True)
+                    invalidate_bm25_cache()
+                    _refresh_collections()
+                    st.success(f"Index repaired: {files} file(s), {total} child chunks.")
+                except LockHeldError:
+                    st.warning("The app (or another ingest) is running; stop it first.")
+                except IndexCorruptError as exc:
+                    st.error(f"Repair failed: {exc}")
+                except Exception as exc:
+                    st.error(f"Repair failed: {exc}")
+                finally:
+                    release_write_lock(locals().get("lock"))
 
     st.divider()
     provider = os.environ.get("LLM_PROVIDER", "claude")
@@ -208,6 +280,9 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
                 seen: set[str] = set()
                 hits = [h for h in pooled if not (h["id"] in seen or seen.add(h["id"]))]
             hits = hits[:top_k]
+        except IndexCorruptError:
+            st.error("The index looks out of sync. Click **Repair index** in the sidebar.")
+            st.stop()
         except RuntimeError as exc:  # missing/empty store
             st.error(str(exc))
             st.stop()
@@ -218,7 +293,6 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
             except RuntimeError as exc:  # missing key, Ollama down, API error
                 st.error(f"LLM error: {exc}")
                 st.stop()
-
         st.markdown(answer)
         with st.expander("Sources"):
             for s in hits:

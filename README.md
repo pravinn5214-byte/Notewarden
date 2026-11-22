@@ -55,6 +55,12 @@ question -------------------> retrieve.py (mode: dense | hybrid | hybrid_rerank)
   child's score.
 - **Retrieval modes**: `dense` (original baseline), `hybrid`, `hybrid_rerank`
   (default). Pick in the sidebar or set `RETRIEVAL_MODE`.
+  **Which mode to use**: `hybrid_rerank` in almost all cases — it was the
+  best on the evaluation below (MRR 0.856 vs 0.667 for `dense` at k=3).
+  `dense` averages the question into one embedding, so on multi-topic
+  questions the dominant topic fills the top-k and a keyword-only topic can
+  be missed entirely; use it only as a baseline. The sidebar shows the same
+  warning when `dense` is selected.
 - **Idempotent ingestion**: chunk IDs are content-derived, so rerunning
   ingestion never duplicates chunks — it only embeds new/changed chunks,
   refreshes metadata, and removes stale ones (children *and* parents) from
@@ -250,6 +256,8 @@ on a synthetic corpus, never touching your real `chroma_db/`.
 | Problem | Fix |
 |---|---|
 | "No vector store found" / index empty | Click **Process documents** (or run `python ingest.py`) |
+| "The index looks out of sync. Click 'Repair index' in the sidebar." | Another process (or a heavy ingest) rewrote `chroma_db/` while the app held a stale HNSW segment. Normally retrieval recovers on its own (the client is reopened once); if not, click **Repair index** — it deletes and rebuilds both collections from `docs/`, reusing the OCR cache so scanned pages aren't re-OCR'd |
+| "The app (or another ingest) is running; stop it first" | A write lock (`.ingest.lock` in the Chroma dir, with PID + stale detection) serializes ingestion/deletes between the app and the CLI. Close the other process first; a lock left by a dead process is reclaimed automatically |
 | "ANTHROPIC_API_KEY is not set" | Set the key, or switch to `LLM_PROVIDER=ollama` |
 | "Ollama is not running" | Start Ollama (`ollama serve`) and pull the model (`ollama pull llama3.1`) |
 | Answers ignore notes / cite nothing | Lower `MIN_SCORE` in `generate.py`, or upload more relevant PDFs |

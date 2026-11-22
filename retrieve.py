@@ -33,6 +33,7 @@ from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from ingest import COLLECTION, DB_DIR, PARENT_COLLECTION
+from store import IndexCorruptError, db_path, get_collections, reset_client, with_index_recovery
 
 EMBED_MODEL = "all-MiniLM-L6-v2"  # must match ingest.py
 RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -47,6 +48,19 @@ _reranker: CrossEncoder | None = None
 _collection: chromadb.Collection | None = None
 _parents: chromadb.Collection | None = None
 _collection_key: str | None = None
+
+
+def _drop_cached_collections() -> None:
+    """Forget collection handles from a stale client (called by store.reset_client)."""
+    global _collection, _parents, _collection_key
+    _collection = None
+    _parents = None
+    _collection_key = None
+
+
+from store import on_reset as _store_on_reset  # noqa: E402
+
+_store_on_reset(_drop_cached_collections)
 
 # BM25 index cache: (db_dir, frozenset(sources)) -> (bm25, chunk_texts, metas).
 # Rebuilt from the Chroma contents whenever the collection or the file
@@ -74,9 +88,13 @@ def _get_resources(db_dir: str) -> tuple[chromadb.Collection, chromadb.Collectio
     global _collection, _parents, _collection_key
     if _collection is None or _collection_key != db_dir:
         try:
-            client = chromadb.PersistentClient(path=db_dir)
-            _collection = client.get_collection(COLLECTION)
-            _parents = client.get_collection(PARENT_COLLECTION)
+            if db_path() == db_dir:
+                _collection, _parents = with_index_recovery(get_collections)
+            else:
+                # Explicit path (tests/eval): open directly there.
+                client = chromadb.PersistentClient(path=db_dir)
+                _collection = client.get_collection(COLLECTION)
+                _parents = client.get_collection(PARENT_COLLECTION)
         except Exception as exc:
             raise RuntimeError(
                 f"No vector store found in {db_dir}/. Run ingest.py (or 'Process "
@@ -98,14 +116,14 @@ def _all_children(db_dir: str) -> tuple[list[str], list[str], list[dict], list[s
     (shouldn't happen, but retrieval must not crash on a half-built store).
     """
     collection, parents = _get_resources(db_dir)
-    data = collection.get(include=["documents", "metadatas"])
+    data = with_index_recovery(lambda: collection.get(include=["documents", "metadatas"]))
     ids = data["ids"]
     texts = data["documents"]
     metas = data["metadatas"]
     parent_ids = sorted({m["parent_id"] for m in metas if "parent_id" in m})
     parent_map: dict[str, str] = {}
     if parent_ids:
-        pdata = parents.get(ids=parent_ids, include=["documents"])
+        pdata = with_index_recovery(lambda: parents.get(ids=parent_ids, include=["documents"]))
         parent_map = dict(zip(pdata["ids"], pdata["documents"]))
     parent_texts = [parent_map.get(m.get("parent_id"), t) for t, m in zip(texts, metas)]
     return ids, texts, metas, parent_texts
@@ -158,9 +176,15 @@ def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) 
     """Dense retrieval: cosine similarity over child chunks."""
     collection, _ = _get_resources(db_dir)
     where = {"source": {"$in": sorted(allowed)}} if allowed else None
-    n = min(k * 5, collection.count())
+    n = min(k * 5, with_index_recovery(collection.count))
     query_vec = _get_embedder().encode([question]).tolist()
-    res = collection.query(query_embeddings=query_vec, n_results=max(1, n), where=where)
+
+    def _query() -> dict:
+        col, _ = _get_resources(db_dir)  # re-resolve after a client reset
+        return col.query(query_embeddings=query_vec, n_results=max(1, n), where=where)
+
+    res = with_index_recovery(lambda: collection.query(
+        query_embeddings=query_vec, n_results=max(1, n), where=where), refetch=_query)
     out = []
     for cid, doc, meta, dist in zip(
         res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]
@@ -231,7 +255,7 @@ def _fill_parent_text(hits: list[dict], parents: chromadb.Collection, db_dir: st
     if not missing:
         return
     wanted = sorted({h["parent_id"] for h in missing})
-    pdata = parent_col.get(ids=wanted, include=["documents"])
+    pdata = with_index_recovery(lambda: parent_col.get(ids=wanted, include=["documents"]))
     pmap = dict(zip(pdata["ids"], pdata["documents"]))
     for h in missing:
         h["parent_text"] = pmap.get(h["parent_id"], h["text"])

@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Iterator
 
-import chromadb
+import chromadb  # noqa: F401  (kept for callers that import chromadb transitively)
 import pymupdf
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
@@ -30,14 +30,17 @@ from ocr import (  # noqa: F401  (re-exported for callers/tests)
     VISION_ENGINE_NAMES, build_engine, cached_ocr_page, get_engine,
     is_tesseract_available, ocr_image_file,
 )
+from store import (  # noqa: F401  (re-exported for callers/tests)
+    IndexCorruptError, LockHeldError, acquire_write_lock, db_path,
+    get_client, health_check, release_write_lock, with_index_recovery,
+)
 
 load_dotenv()
 
 DOCS_DIR = Path("docs")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
-DB_DIR = "chroma_db"
-COLLECTION = "notes"          # child chunks (embedded)
-PARENT_COLLECTION = "parents"  # parent chunks (not embedded, context only)
+DB_DIR = db_path()  # CHROMA_DIR env var, default chroma_db/
+from store import COLLECTION, PARENT_COLLECTION  # single source of truth
 EMBED_MODEL = "all-MiniLM-L6-v2"  # small, free, runs locally
 CHILD_SIZE = 120   # words per child chunk
 CHILD_OVERLAP = 20
@@ -337,9 +340,15 @@ def ingest_pdfs(
         except Exception:
             pass  # diagnostic only
 
-    client = chromadb.PersistentClient(path=db_dir)
-    collection = client.get_or_create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
-    parents = client.get_or_create_collection(PARENT_COLLECTION)  # no embeddings needed
+    client = get_client(db_dir)
+    lock = acquire_write_lock()
+    try:
+        collection = with_index_recovery(
+            lambda: client.get_or_create_collection(COLLECTION, metadata={"hnsw:space": "cosine"}))
+        parents = with_index_recovery(lambda: client.get_or_create_collection(PARENT_COLLECTION))
+    except BaseException:
+        release_write_lock(lock)
+        raise
 
     ids, texts, metas = [], [], []
     parent_ids, parent_texts = [], []
@@ -456,11 +465,23 @@ def ingest_pdfs(
     if progress_cb:
         progress_cb(f"Removed {len(stale)} stale child / {len(stale_parents)} stale parent chunk(s)")
 
+    release_write_lock(lock)
     return len(docs), collection.count()
 
 
 def main() -> None:
-    files, total = ingest_pdfs()
+    try:
+        health_check()
+    except IndexCorruptError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        print("Fix: delete the index directory and run this command again "
+              "(OCR is cached, so pages won't be re-OCR'd).", file=sys.stderr)
+        sys.exit(1)
+    try:
+        files, total = ingest_pdfs()
+    except LockHeldError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"{files} document(s) processed, {total} child chunks stored in {DB_DIR}/")
 
 
