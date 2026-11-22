@@ -171,6 +171,8 @@ def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) 
             "source": meta["source"],
             "page": meta["page"],
             "parent_id": meta.get("parent_id", cid),
+            "ocr": bool(meta.get("ocr", False)),
+            "ocr_engine": meta.get("ocr_engine", ""),
             "dense_score": 1 - dist,
         })
     return out
@@ -191,6 +193,8 @@ def _bm25_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) -
             "page": metas[i]["page"],
             "parent_id": metas[i].get("parent_id", ids[i]),
             "parent_text": parent_texts[i],
+            "ocr": bool(metas[i].get("ocr", False)),
+            "ocr_engine": metas[i].get("ocr_engine", ""),
             "bm25_rank": rank,
         }
         for rank, i in enumerate(order, start=1)

@@ -7,6 +7,11 @@
 | PDF upload & library | `app.py` sidebar | Upload multiple PDFs → saved to `docs/`; per-file delete (🗑) also removes its chunks from the index |
 | Per-file selection | `app.py` sidebar | Checkboxes decide which files answers can draw on; BM25 respects the filter |
 | PDF ingestion & chunking | `ingest.py` | PyMuPDF extraction + `clean_text()` (camelCase/letter-digit splits, de-hyphenation) → child/parent word windows; fused-token diagnostic on ingest |
+| OCR for scanned pages & images | `ocr.py` + `ingest.py` | Pages with < `OCR_MIN_CHARS` (default 30) extracted chars are OCR'd; `.png`/`.jpg`/`.jpeg` uploads become 1-page OCR'd documents; `ocr: true/false` + `ocr_engine` chunk metadata + `OCR · <engine>` badge in Sources; swappable `OcrEngine` interface |
+| OCR engines (incl. handwriting) | `ocr.py` | `tesseract` (local, free, print-quality) · `claude` (Anthropic vision API, best on cursive; `OCR_CLAUDE_MODEL`) · `ollama` (local vision model, `OCR_OLLAMA_MODEL`, respects `OLLAMA_HOST`) · `auto` (tesseract first; mean word confidence < `OCR_CONF_THRESHOLD` [60] or garbage text escalates to `OCR_VISION_ENGINE`); shared transcription prompt; retries w/ backoff; vision failure falls back to Tesseract |
+| OCR engine cache | `ocr_cache/` | Cached per (file hash, page, engine, model) — switching engines never returns stale text; old tesseract-only entries stay valid |
+| Vision cost control | `ingest.py` | Ingest prints "~N pages will use the vision model"; `OCR_MAX_VISION_PAGES` (default 50) per run, excess pages fall back to Tesseract with a warning; sidebar shows whether pages leave the machine |
+| OCR engine comparison | `ocr_compare.py` | CER/WER + time per engine against a ground-truth .txt for one image/PDF page |
 | Idempotent indexing | `ingest.py` | Content-derived chunk IDs: re-ingesting never duplicates; stale children & parents removed; metadata refreshed |
 | Vector store | `chroma_db/` | ChromaDB persistent client, cosine distance (`notes` children + `parents` context) |
 | Semantic retrieval | `retrieve.py` | `all-MiniLM-L6-v2` sentence-transformer; top-k chunks with similarity scores |
@@ -22,9 +27,9 @@
 | Tunable parameters | `app.py` sidebar | Child/parent chunk size, top-k (1–10), retrieval mode |
 | Retrieval evaluation | `evaluate.py` + `eval_questions.json` | 45 tagged questions (keyword/semantic); all 3 modes at k=3/5 with bootstrap 95% CIs; per-tag breakdown; results in `eval_results.md` |
 | Parent-child ablation | `ablation.py` | LLM-as-judge check that parent vs child context contains the answer |
-| Tests | `tests/test_retrieval.py` | Round trip, idempotency, delete cleanup, RRF maths, parent dedupe, tokenizer, clean_text |
+| Tests | `tests/test_retrieval.py`, `tests/test_ocr.py`, `tests/test_ocr_vision.py` | Round trip, idempotency, delete cleanup, RRF maths, parent dedupe, tokenizer, clean_text; OCR: image-only PDF ingests + is retrievable, text-layer PDF not OCR'd, cache hit, graceful no-Tesseract (skipped if Tesseract absent); vision: auto escalation, per-engine cache keys, API-failure fallback, page cap, engine metadata (all fakes, no network) |
 | CLI pipeline | all modules | `python ingest.py`, `retrieve.py "q" --mode hybrid_rerank`, `generate.py "q"` — full pipeline without the UI |
-| Config | `.env` | `LLM_PROVIDER`, `OLLAMA_MODEL`, `ANTHROPIC_API_KEY`, `RETRIEVAL_MODE` |
+| Config | `.env` | `LLM_PROVIDER`, `OLLAMA_MODEL`, `ANTHROPIC_API_KEY`, `RETRIEVAL_MODE`, `TESSERACT_CMD`, `OCR_LANG`, `OCR_MIN_CHARS`, `OCR_PREPROCESS`, `OCR_ENGINE`, `OCR_VISION_ENGINE`, `OCR_CONF_THRESHOLD`, `OCR_CLAUDE_MODEL`, `OCR_OLLAMA_MODEL`, `OCR_MAX_VISION_PAGES` |
 
 ## 🔮 What we could do next
 
@@ -45,6 +50,8 @@
 - [x] **Hybrid search** — BM25 keyword search fused with vector search (RRF, k=60) — `retrieve.py` `hybrid` mode
 - [x] **Re-ranking** — cross-encoder `ms-marco-MiniLM-L-6-v2` on the fused top-20 — `hybrid_rerank` mode (default)
 - [x] **Parent-child chunks** — 120-word children for matching, 500-word page-aware parents for LLM context — `ingest.py`
+- [x] **OCR for scanned pages & images** — Tesseract + vision engines (Claude / Ollama) via `ocr.py` (`OcrEngine` interface), with `auto` escalation and engine comparison (`ocr_compare.py`)
+- [ ] Better OCR models — plug a stronger vision LLM behind `ocr.py`'s `OcrEngine` interface
 - [ ] Better chunking — respect headings/paragraph boundaries instead of fixed word windows
 - [ ] Metadata filters (by file, page range) in the UI
 

@@ -31,6 +31,18 @@ question -------------------> retrieve.py (mode: dense | hybrid | hybrid_rerank)
   splits camelCase/letter-digit joins, re-joins hyphenated line breaks, and
   collapses whitespace before chunking — dense, BM25 and parent text all use
   the same cleaned words. Ingestion prints the fused-token % before/after.
+- **OCR (scanned pages & images)**: pages with (almost) no text layer — fewer
+  than `OCR_MIN_CHARS` (default 30) non-whitespace chars — are rendered at 300
+  DPI with PyMuPDF and OCR'd with Tesseract (`ocr.py`), as are standalone
+  `.png`/`.jpg`/`.jpeg` uploads (1-page documents). OCR text goes through the
+  same `clean_text()` and chunking, so page numbers and citations stay
+  correct; chunk metadata records `ocr: true/false` and the Sources panel
+  shows an `OCR` badge. OCR text is cached per (file hash, page) under
+  `ocr_cache/`, so re-ingesting never re-OCRs an unchanged page.
+  **Quality note**: Tesseract is good on printed/scanned text but poor on
+  cursive handwriting. `ocr.py` is built around a small `OcrEngine` interface,
+  so a stronger backend (a vision-capable LLM or TrOCR) can be swapped in
+  later without touching the rest of the pipeline.
 - **BM25 tokenizer**: lowercase, punctuation-stripped, keeps intra-token
   hyphens/underscores (`INV-YYYY-XXXX`, `G-quadruplex` survive), drops a small
   stopword list. Same tokenizer for index and queries.
@@ -75,6 +87,105 @@ set OLLAMA_MODEL=llama3.1        # optional, this is the default
 ```
 
 (On bash use `export` instead of `set`.)
+
+### Setting up OCR
+
+OCR (for scanned pages and image notes) needs the Tesseract binary — the
+Python side (`pytesseract`, `Pillow`) comes from `requirements.txt`.
+
+**Windows**
+1. Install the [UB Mannheim Tesseract build](https://github.com/UB-Mannheim/tesseract/wiki).
+2. In the installer, under *Additional language data*, tick **English**
+   (and any other languages you read).
+3. Add the install folder (default `C:\Program Files\Tesseract-OCR`) to PATH,
+   or set the binary path in `.env`:
+   ```
+   TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
+   ```
+   (If it's at the default path, the app finds it even without PATH.)
+4. Verify in a new terminal: `tesseract --version`
+
+**macOS**
+
+```
+brew install tesseract
+```
+
+**Linux (Debian/Ubuntu)**
+
+```
+sudo apt install tesseract-ocr
+```
+
+The app detects Tesseract at startup; if it's missing you get a one-time
+warning and scanning/image pages are skipped (the rest still ingests).
+
+Optional `.env` settings: `OCR_LANG` (default `eng`; use e.g. `eng+deu` for
+multiple languages), `OCR_MIN_CHARS` (page treated as scanned below this many
+extracted chars), `OCR_PREPROCESS` (`contrast` or `threshold` for faint
+scans).
+
+### Handwritten notes
+
+Tesseract is good on printed/scanned text but weak on cursive. For
+handwritten pages, pick a vision engine:
+
+```
+# in .env
+OCR_ENGINE=claude          # or ollama, or auto
+OCR_CLAUDE_MODEL=claude-sonnet-4-20250514
+OCR_OLLAMA_MODEL=llama3.2-vision   # then: ollama pull llama3.2-vision
+```
+
+| Engine | Quality on handwriting | Cost | Privacy | Speed |
+|---|---|---|---|---|
+| `tesseract` | Poor on cursive | Free, local | Local | Fast (~1 s/page) |
+| `claude` | Best (handles cursive, math, diagrams) | API $ per page | Page images sent to Anthropic | ~3-8 s/page |
+| `ollama` | Good with a vision model pulled (e.g. `llama3.2-vision`) | Free, local | Local | ~5-20 s/page (GPU-dependent) |
+| `auto` | Best of both: Tesseract keeps confident printed pages, escalates shaky ones to `OCR_VISION_ENGINE` | Mostly free | Mostly local | Fast on printed, slow on escalated pages |
+
+- **`auto` mode** runs Tesseract first and computes mean word confidence
+  (`pytesseract.image_to_data`). Pages scoring below `OCR_CONF_THRESHOLD`
+  (default 60) or producing mostly non-dictionary text are re-transcribed by
+  the vision engine in `OCR_VISION_ENGINE` (claude|ollama).
+- **Caching**: OCR text is cached per (file hash, page, engine, model) under
+  `ocr_cache/` — switching engines never returns another engine's stale text.
+- **Cost control**: `OCR_MAX_VISION_PAGES` (default 50) caps how many pages
+  per ingest run use a vision engine; the rest fall back to Tesseract with a
+  warning. The ingest prints "~N pages will use the vision model" up front.
+- **Failures**: vision calls retry with backoff on rate limits/transient
+  errors; a page that still fails falls back to Tesseract. Ingestion never
+  crashes on an API outage.
+- **Engine choice in the app**: pick it in the sidebar; a caption there tells
+  you whether pages leave the machine.
+
+**Tips for photographing notes** (applies to every engine, most of all the
+vision ones):
+- Good, even light; avoid shadows across the page.
+- Shoot the page flat and straight-on; one page per image.
+- High contrast: dark pen on light paper; avoid glare.
+- Fill the frame with the page; higher resolution beats zooming.
+
+**Measuring your handwriting**: `ocr_compare.py` scores engines against a
+ground-truth transcription of one page:
+
+```
+python ocr_compare.py my_notes.png truth.txt                  # all engines
+python ocr_compare.py scanned.pdf truth.txt --page 3 --engines claude,ollama
+```
+
+It prints CER/WER (lower is better) and time per page.
+
+**Troubleshooting**
+
+| Problem | Fix |
+|---|---|
+| `tesseract is not installed or it is not in your PATH` (pytesseract error) | Install Tesseract (above) or set `TESSERACT_CMD` in `.env` to the full binary path |
+| Missing language data / `Please make sure the TESSDATA_PREFIX environment variable is set correctly` | The language pack wasn't installed. Re-run the installer (Windows) and tick the language, or install e.g. `tesseract-ocr-deu` (Linux); point `TESSDATA_PREFIX` at the `tessdata` folder if it lives elsewhere |
+| Handwriting recognized poorly | Expected — Tesseract is weak on cursive. Set `OCR_ENGINE=claude` (or `auto`) in `.env`, or try `OCR_PREPROCESS=threshold` for faint scans |
+| `ANTHROPIC_API_KEY is not set` with `OCR_ENGINE=claude` | Set the key in `.env`, or switch to `OCR_ENGINE=ollama` (local) |
+| `Ollama vision OCR failed` / model not found | `ollama pull llama3.2-vision` (or set `OCR_OLLAMA_MODEL` to a vision model you have), and check Ollama is running |
+| Vision costs too high on big scans | Lower `OCR_MAX_VISION_PAGES`, or use `OCR_ENGINE=auto` so only shaky pages hit the API |
 
 ## Run
 

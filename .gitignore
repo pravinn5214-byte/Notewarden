@@ -9,5 +9,6 @@ venv/
 chroma_db/
 eval_chroma_db*/
 eval_results.md
+ocr_cache/
 .pytest_cache/
 eval_chroma_db*/

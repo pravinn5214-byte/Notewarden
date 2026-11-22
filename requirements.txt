@@ -1,5 +1,7 @@
 pypdf
 pymupdf
+pytesseract
+Pillow
 sentence-transformers
 chromadb
 streamlit
