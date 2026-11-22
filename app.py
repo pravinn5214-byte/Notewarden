@@ -14,7 +14,8 @@ import streamlit as st
 from generate import FALLBACK_MESSAGE, OLLAMA_DEFAULT_MODEL, generate_answer
 from ingest import IMAGE_EXTENSIONS, ingest_pdfs
 from ocr import is_tesseract_available
-from retrieve import DEFAULT_MODE, MODES, invalidate_bm25_cache, retrieve
+from retrieve import DEFAULT_MODE, MODES, invalidate_bm25_cache, retrieve, retrieve_multi
+from decompose import Decomposition, decompose
 from store import (  # noqa: F401  (re-exported for callers/tests)
     IndexCorruptError, LockHeldError, acquire_write_lock, db_path,
     get_client, get_collections, health_check, release_write_lock,
@@ -159,6 +160,14 @@ with st.sidebar:
     if mode == "dense":
         st.caption("Dense mode can miss one topic in multi-topic questions. "
                    "Hybrid is recommended.")
+    decompose_enabled = st.checkbox(
+        "Split multi-topic questions",
+        value=os.environ.get("DECOMPOSE", "on").lower() != "off",
+        help="Splits multi-topic questions into one search per topic so each "
+             "gets its own evidence.",
+    )
+    if decompose_enabled:
+        st.caption("Adds one short LLM call for multi-part questions.")
 
     if st.button("🗑️ Process documents", use_container_width=True):
         if not selected:
@@ -232,6 +241,32 @@ with st.sidebar:
     st.caption(f"LLM provider: **{provider}**"
                + (f" ({os.environ.get('OLLAMA_MODEL', OLLAMA_DEFAULT_MODEL)})" if provider == "ollama" else ""))
 
+def _render_sources(sources: list[dict], subqueries: list[str] | None = None,
+                    supported: set | None = None) -> None:
+    """Sources expander body: grouped by sub-question when decomposed."""
+    with st.expander("Sources"):
+        if subqueries and len(subqueries) > 1:
+            supported = supported if supported is not None else set(range(len(subqueries)))
+            by_sub: dict[int, list] = {}
+            for s in sources:
+                by_sub.setdefault(s.get("subquery_index", 0), []).append(s)
+            for i, sub in enumerate(subqueries):
+                st.markdown(f"**Sub-question {i + 1}:** {sub}")
+                if i not in supported:
+                    st.caption("no relevant notes found")
+                for s in by_sub.get(i, []):
+                    _source_line(s)
+        else:
+            for s in sources:
+                _source_line(s)
+
+
+def _source_line(s: dict) -> None:
+    badge = f" · `OCR · {s['ocr_engine']}`" if s.get("ocr") and s.get("ocr_engine") else (" · `OCR`" if s.get("ocr") else "")
+    st.markdown(f"**{s['source']}** — page {s['page']}{badge} — score `{s['score']:.2f}`")
+    st.text(s["text"][:600] + ("..." if len(s["text"]) > 600 else ""))
+
+
 # --- Main: chat ----------------------------------------------------------
 st.title("💬 Chat with your notes")
 
@@ -244,11 +279,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["text"])
         if msg.get("sources"):
-            with st.expander("Sources"):
-                for s in msg["sources"]:
-                    badge = f" · `OCR · {s['ocr_engine']}`" if s.get("ocr") and s.get("ocr_engine") else (" · `OCR`" if s.get("ocr") else "")
-                    st.markdown(f"**{s['source']}** — page {s['page']}{badge} — score `{s['score']:.2f}`")
-                    st.text(s["text"][:600] + ("..." if len(s["text"]) > 600 else ""))
+            _render_sources(msg["sources"], msg.get("subqueries"), msg.get("supported"))
 
 if question := st.chat_input("Ask about your notes...", disabled=bool(blockers)):
     st.session_state.messages.append({"role": "user", "text": question})
@@ -256,30 +287,21 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
         st.markdown(question)
 
     with st.chat_message("assistant"):
+        allowed_names = [p.name for p in selected]
+        with st.spinner("Splitting question..." if decompose_enabled else None):
+            decomposition = decompose(question) if decompose_enabled else None
         try:
-            # Retrieve deeper than k, then keep only chunks from the files
-            # currently ticked, so answers only draw on the selection.
-            hits = retrieve(
-                question, k=top_k * 4, mode=mode,
-                allowed_sources=[p.name for p in selected],
-            )
-            allowed = {p.name for p in selected}
-            hits = [h for h in hits if h["source"] in allowed]
-            # Multi-topic questions: single-query retrieval tends to fill the
-            # top-k with one topic's chunks. Round-robin by source keeps the
-            # other file(s) represented before ranking cuts back to top_k.
-            if len(allowed) > 1 and len({h["source"] for h in hits}) > 1:
-                by_source: dict[str, list] = {}
-                for h in hits:
-                    by_source.setdefault(h["source"], []).append(h)
-                pooled, order = [], sorted(by_source)
-                while any(by_source[s] for s in order):
-                    for s in order:
-                        if by_source[s]:
-                            pooled.append(by_source[s].pop(0))
-                seen: set[str] = set()
-                hits = [h for h in pooled if not (h["id"] in seen or seen.add(h["id"]))]
-            hits = hits[:top_k]
+            if decomposition is not None and len(decomposition.subqueries) > 1:
+                hits, supported = retrieve_multi(
+                    decomposition.subqueries, mode=mode, top_k=top_k,
+                    files=allowed_names,
+                )
+            else:
+                hits = retrieve(
+                    question, k=top_k, mode=mode,
+                    allowed_sources=allowed_names,
+                )
+                supported = {0} if hits else set()
         except IndexCorruptError:
             st.error("The index looks out of sync. Click **Repair index** in the sidebar.")
             st.stop()
@@ -289,23 +311,15 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
 
         with st.spinner("Thinking..." if mode == "dense" else "Re-ranking & thinking..."):
             try:
-                answer = generate_answer(question, hits)
+                answer = generate_answer(question, hits, decomposition=decomposition)
             except RuntimeError as exc:  # missing key, Ollama down, API error
                 st.error(f"LLM error: {exc}")
                 st.stop()
         st.markdown(answer)
-        with st.expander("Sources"):
-            for s in hits:
-                badge = f" · `OCR · {s['ocr_engine']}`" if s.get("ocr") and s.get("ocr_engine") else (" · `OCR`" if s.get("ocr") else "")
-                parts = [f"**{s['source']}** — page {s['page']}{badge}",
-                         f"dense `{s.get('dense_score', float('nan')):.2f}`"]
-                if "bm25_rank" in s:
-                    parts.append(f"BM25 rank {s['bm25_rank']}")
-                if "rerank_score" in s:
-                    parts.append(f"rerank `{s['rerank_score']:.2f}`")
-                st.markdown(" | ".join(parts))
-                st.text(s["text"][:600] + ("..." if len(s["text"]) > 600 else ""))
+        _render_sources(hits, decomposition.subqueries if decomposition else None, supported)
 
     st.session_state.messages.append(
-        {"role": "assistant", "text": answer, "sources": hits if answer != FALLBACK_MESSAGE else hits}
+        {"role": "assistant", "text": answer, "sources": hits,
+         "subqueries": decomposition.subqueries if decomposition else None,
+         "supported": supported if decomposition else None}
     )

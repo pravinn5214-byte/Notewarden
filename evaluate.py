@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ingest import CHILD_SIZE, ingest_pdfs
-from retrieve import MODES, retrieve
+from retrieve import MODES, retrieve, retrieve_multi
 
 EVAL_FILE = Path("eval_questions.json")
 RESULTS_FILE = Path("eval_results.md")
@@ -95,9 +95,74 @@ def evaluate_mode(questions: list[dict], mode: str, k: int, db_dir: str) -> dict
     return out
 
 
+MULTITOPIC_FILE = Path("eval_multitopic.json")
+
+
+def both_covered(hits: list[dict], topics: list[dict], k: int) -> bool:
+    """True when every topic's keyword appears in a hit from its expected
+    source within the top-k."""
+    top = hits[:k]
+    for topic in topics:
+        ok = any(
+            h["source"] == topic.get("expected_source") and
+            topic.get("keyword", "").lower() in h["text"].lower()
+            for h in top)
+        if not ok:
+            return False
+    return True
+
+
+def evaluate_multitopic(mode: str, k: int, db_dir: str, decompose_on: bool) -> float:
+    """Rate of two-topic questions where BOTH topics are covered in the top-k."""
+    questions = load_questions(MULTITOPIC_FILE)
+    covered = 0
+    for q in questions:
+        if decompose_on:
+            from decompose import decompose
+            dec = decompose(q["question"])
+            subs = dec.subqueries
+            if len(subs) > 1:
+                hits, _ = retrieve_multi(subs, mode=mode, top_k=k, db_dir=db_dir)
+            else:
+                hits = retrieve(q["question"], k=k, db_dir=db_dir, mode=mode)
+        else:
+            hits = retrieve(q["question"], k=k, db_dir=db_dir, mode=mode)
+        if both_covered(hits, q["topics"], k):
+            covered += 1
+    return covered / len(questions)
+
+
+def run_multitopic(sizes: list[int], write: bool) -> None:
+    """--multitopic: 'both topics covered in top-k' rate, decompose off vs on."""
+    from decompose import clear_cache
+    rows: list[str] = ["| mode | k | decompose off | decompose on |", "|---|---|---|---|"]
+    for child_size in sizes:
+        db_dir = f"{DB_DIR}_{child_size}"
+        print(f"Ingesting at child size {child_size} into {db_dir}/ ...")
+        ingest_pdfs(child_size=child_size, child_overlap=OVERLAP, db_dir=db_dir)
+        for mode in MODES:
+            for k in KS:
+                clear_cache()
+                off = evaluate_multitopic(mode, k, db_dir, decompose_on=False)
+                clear_cache()
+                on = evaluate_multitopic(mode, k, db_dir, decompose_on=True)
+                print(f"  {mode:>14} k={k}: off={off:.0%} on={on:.0%}")
+                rows.append(f"| {mode} | {k} | {off:.0%} | {on:.0%} |")
+    report = "\n".join(["## Multi-topic coverage — decompose off vs on", "", *rows])
+    print(f"\n{report}")
+    if write:
+        out = Path("eval_results_multitopic.md")
+        out.write_text(report + "\n", encoding="utf-8")
+        print(f"Saved to {out}")
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     ablation = "--ablation" in sys.argv
+    if "--multitopic" in sys.argv:
+        sizes = [int(a) for a in args] or [CHILD_SIZE]
+        run_multitopic(sizes, write="--write" in sys.argv)
+        return
     sizes = [int(a) for a in args] or [CHILD_SIZE]
     questions = load_questions()
     print(f"{len(questions)} questions ({sum(1 for q in questions if q['tag']=='keyword')} keyword / "

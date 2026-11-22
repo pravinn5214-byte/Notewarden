@@ -341,6 +341,148 @@ def best_dense_score(question: str, db_dir: str = DB_DIR, allowed_sources: list[
     return hits[0]["dense_score"] if hits else 0.0
 
 
+def _merge_rank_key(h: dict) -> float:
+    """Best available ranking score for merging (higher is better)."""
+    if "rerank_score" in h:
+        return h["rerank_score"]
+    if "rrf" in h:
+        return h["rrf"]
+    return h.get("dense_score", h.get("score", 0.0))
+
+
+def retrieve_multi(
+    subqueries: list[str],
+    mode: str = DEFAULT_MODE,
+    top_k: int = TOP_K,
+    db_dir: str = DB_DIR,
+    files: list[str] | None = None,
+    return_parents: bool = True,
+) -> tuple[list[dict], set[int]]:
+    """Retrieve evidence for each sub-query separately, then merge.
+
+    Per sub-query: the existing single-query pipeline (same mode/file filter),
+    then the mode-independent relevance gate (dense cosine >= MIN_SCORE).
+    A sub-query with no hit above the gate is unsupported (its index is left
+    out of the returned `supported` set) instead of failing the question.
+
+    Merge with guaranteed slots: each supported sub-query first keeps its best
+    min(2, top_k) distinct parents; remaining slots (budget
+    min(top_k * supported, DECOMPOSE_MAX_CONTEXT)) go to the best remaining
+    hits by rank score. Dedupe by parent across sub-queries; a parent returned
+    for several sub-queries is kept once with its best score and every
+    matching subquery_index.
+
+    Returns (merged_hits, supported_subquery_indices).
+    """
+    from generate import MIN_SCORE  # local import: generate imports retrieve's siblings
+
+    import os as _os
+    max_context = int(_os.environ.get("DECOMPOSE_MAX_CONTEXT", "8"))
+
+    allowed = set(files) if files else None
+    if len(subqueries) == 1:
+        # Exactly the old single-query path: same results, same order, no
+        # gate (relevance gating for a single query stays in generate.py, as
+        # before), and no parent dedupe (it would collapse dense children
+        # sharing a parent).
+        hits = retrieve(subqueries[0], k=top_k, db_dir=db_dir, mode=mode,
+                        allowed_sources=list(allowed) if allowed else None,
+                        return_parents=return_parents)
+        for h in hits:
+            h["subquery_index"] = 0
+            h["subquery_indices"] = [0]
+        return hits, ({0} if hits else set())
+
+    per_sub: list[list[dict]] = []
+    for i, q in enumerate(subqueries):
+        hits = retrieve(q, k=top_k, db_dir=db_dir, mode=mode,
+                        allowed_sources=list(allowed) if allowed else None,
+                        return_parents=return_parents)
+        # Gate per sub-query: mode-independent dense cosine.
+        kept = [h for h in hits if h.get("dense_score", 0.0) >= MIN_SCORE]
+        for h in kept:
+            h["subquery_index"] = i
+        per_sub.append(kept)
+
+    supported = {i for i, hits in enumerate(per_sub) if hits}
+    unsupported_count = len(subqueries) - len(supported)
+    if unsupported_count:
+        import logging
+        logging.getLogger(__name__).info(
+            "retrieve_multi: %d of %d sub-queries unsupported", unsupported_count, len(subqueries))
+    if not supported:
+        return [], supported
+
+    # Dedupe by parent across sub-queries, keeping the best score and all
+    # matching subquery_index values.
+    by_parent: dict[str, dict] = {}
+    for i, hits in enumerate(per_sub):
+        for h in hits:
+            pid = h.get("parent_id", h["id"])
+            existing = by_parent.get(pid)
+            if existing is None:
+                merged = dict(h)
+                merged["subquery_index"] = i
+                merged["subquery_indices"] = {i}
+                by_parent[pid] = merged
+            else:
+                existing["subquery_indices"].add(i)
+                if _merge_rank_key(h) > _merge_rank_key(existing):
+                    better = dict(h)
+                    better["subquery_index"] = existing["subquery_index"]
+                    better["subquery_indices"] = existing["subquery_indices"]
+                    by_parent[pid] = better
+    for m in by_parent.values():
+        m["subquery_indices"] = sorted(m["subquery_indices"])
+
+    all_hits = sorted(by_parent.values(), key=_merge_rank_key, reverse=True)
+
+    budget = min(top_k * len(supported), max_context)
+    slot_count = min(2, top_k)
+
+    # Guaranteed slots: best distinct parents of each supported sub-query
+    # first, up to slot_count each, preferring hits only that sub-query found.
+    guaranteed: list[dict] = []
+    used_parents: set[str] = set()
+    remaining_slots = budget
+    for i in sorted(supported):
+        if remaining_slots <= 0:
+            break
+        sub_hits = [h for h in all_hits if i in h["subquery_indices"]]
+        own_first = [h for h in sub_hits if len(h["subquery_indices"]) == 1] + \
+                    [h for h in sub_hits if len(h["subquery_indices"]) > 1]
+        taken = 0
+        for h in own_first:
+            if taken >= slot_count or remaining_slots <= 0:
+                break
+            pid = h.get("parent_id", h["id"])
+            if pid in used_parents:
+                continue
+            guaranteed.append(h)
+            used_parents.add(pid)
+            remaining_slots -= 1
+            taken += 1
+        if len(guaranteed) >= budget:
+            break
+
+    # Remaining slots: best remaining hits across all sub-queries.
+    merged = list(guaranteed)
+    if remaining_slots > 0:
+        for h in all_hits:
+            if remaining_slots <= 0:
+                break
+            pid = h.get("parent_id", h["id"])
+            if pid in used_parents:
+                continue
+            merged.append(h)
+            used_parents.add(pid)
+            remaining_slots -= 1
+
+    # Order: best score first (stable, matches the single-query shape).
+    merged.sort(key=lambda h: (-_merge_rank_key(h), min(h["subquery_indices"])))
+    return merged[:budget], supported
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Retrieve chunks for a question")
     parser.add_argument("question", nargs="+")

@@ -72,10 +72,51 @@ question -------------------> retrieve.py (mode: dense | hybrid | hybrid_rerank)
   ≈ 0.3+), while RRF scores peak near 0.03 and cross-encoder scores are often
   negative, so gating on either would reject good results.
 - **Multi-topic questions**: a question touching several topics/files is
-  answered per part (`**Part 1 — <topic>**, **Part 2 — …**`), and the app
-  round-robins retrieval hits by source before the top-k cut, so one topic
-  can't crowd the other out. Prefer `hybrid`/`hybrid_rerank` over `dense` for
-  such questions — dense averaging loses the keyword-only topic.
+  **decomposed** into one search query per topic (`decompose.py`): one short
+  LLM call returns the sub-queries, each is retrieved separately, the results
+  are merged with guaranteed slots per topic (weak chunks from one topic can
+  no longer crowd out the other), and the answer covers each part under its
+  own heading. See "Multi-topic questions" below.
+
+## Multi-topic questions
+
+When you ask something like *"Explain how ribosomes make proteins, and what
+the Tagverse CRM lead pipeline does"*, a single dense embedding averages the
+two topics and one of them fills the top-k. Query decomposition fixes that:
+
+1. **Skip rule (no LLM call)**: short questions, or questions without a
+   multi-topic signal (" and ", "compare", "difference between", ";", a
+   second "?", a list...), are searched as-is.
+2. **Split (one short LLM call)**: the same provider that answers your
+   questions (claude/ollama, temperature 0, ~200 tokens) returns one
+   self-contained search query per topic as JSON. Independent topics get
+   `answer_as_parts=true` (the answer has **Part N** headings); comparisons
+   ("difference between X and Y") get one integrated answer instead.
+3. **Retrieve per sub-query** with your chosen mode, gate each sub-query on
+   the dense relevance score separately, then merge with guaranteed slots so
+   every supported topic keeps at least `min(2, top_k)` of its best chunks.
+4. **Failure-safe**: malformed LLM output, an LLM error, or a topic that isn't
+   in your notes never breaks the question — it falls back to the original
+   query, or that part is reported as "no relevant notes found". Decomposition
+   results are cached in-process (LRU, 128), so re-asks and Streamlit reruns
+   don't repeat the call.
+
+Environment variables (see `.env`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DECOMPOSE` | `on` | `off` disables splitting (also a sidebar checkbox) |
+| `DECOMPOSE_MAX_SUBQUERIES` | `3` | max sub-queries per question |
+| `DECOMPOSE_MAX_CONTEXT` | `8` | total context budget for merged retrieval |
+
+Known limits: a bad split falls back to the original query (single-topic
+behaviour); a topic missing from the notes gets "not covered" for that part
+rather than a guess. Measure it yourself:
+
+```
+python evaluate.py --multitopic          # "both topics covered in top-k" rate, off vs on
+python evaluate.py --multitopic --write  # also save to eval_results_multitopic.md
+```
 
 ## Setup
 
