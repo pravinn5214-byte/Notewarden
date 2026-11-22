@@ -21,7 +21,8 @@
 | Retrieval modes | `app.py` sidebar | `dense` / `hybrid` / `hybrid_rerank` (default); also `RETRIEVAL_MODE` env var |
 | Relevance gate | `generate.py` | Gates on dense cosine (mode-independent), `MIN_SCORE` = 0.3 |
 | Sources panel | `app.py` | Shows dense score, BM25 rank, rerank score, file, page per result |
-| Grounded generation | `generate.py` | LLM answers only from context, cites as `[file p.N]` |
+| Grounded generation | `generate.py` | LLM answers only from context, cites as `[file p.N]`; multi-topic questions answered per part (`**Part N — <topic>**` headings, each part cited or flagged as unsupported) |
+| Multi-source top-k | `app.py` | When a question matches chunks from several selected files, hits are round-robined by source before the top-k cut, so one topic can't crowd out the other file's chunks |
 | Two LLM providers | `generate.py` | `claude` (Anthropic API) or `ollama` (local, e.g. `llama3.2`), picked via `LLM_PROVIDER` |
 | Chat UI | `app.py` | Streamlit chat with message history (per browser session), Sources expander per answer |
 | Tunable parameters | `app.py` sidebar | Child/parent chunk size, top-k (1–10), retrieval mode |

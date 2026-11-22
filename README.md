@@ -65,6 +65,11 @@ question -------------------> retrieve.py (mode: dense | hybrid | hybrid_rerank)
   the best candidate in every mode — cosine is calibrated (0..1, related text
   ≈ 0.3+), while RRF scores peak near 0.03 and cross-encoder scores are often
   negative, so gating on either would reject good results.
+- **Multi-topic questions**: a question touching several topics/files is
+  answered per part (`**Part 1 — <topic>**, **Part 2 — …**`), and the app
+  round-robins retrieval hits by source before the top-k cut, so one topic
+  can't crowd the other out. Prefer `hybrid`/`hybrid_rerank` over `dense` for
+  such questions — dense averaging loses the keyword-only topic.
 
 ## Setup
 
