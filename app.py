@@ -192,7 +192,22 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
                 allowed_sources=[p.name for p in selected],
             )
             allowed = {p.name for p in selected}
-            hits = [h for h in hits if h["source"] in allowed][:top_k]
+            hits = [h for h in hits if h["source"] in allowed]
+            # Multi-topic questions: single-query retrieval tends to fill the
+            # top-k with one topic's chunks. Round-robin by source keeps the
+            # other file(s) represented before ranking cuts back to top_k.
+            if len(allowed) > 1 and len({h["source"] for h in hits}) > 1:
+                by_source: dict[str, list] = {}
+                for h in hits:
+                    by_source.setdefault(h["source"], []).append(h)
+                pooled, order = [], sorted(by_source)
+                while any(by_source[s] for s in order):
+                    for s in order:
+                        if by_source[s]:
+                            pooled.append(by_source[s].pop(0))
+                seen: set[str] = set()
+                hits = [h for h in pooled if not (h["id"] in seen or seen.add(h["id"]))]
+            hits = hits[:top_k]
         except RuntimeError as exc:  # missing/empty store
             st.error(str(exc))
             st.stop()

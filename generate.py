@@ -35,6 +35,11 @@ excerpted from the user's study notes.
 
 Rules:
 - Use only facts stated in the context. Do not use outside knowledge.
+- If the question asks about several distinct things (e.g. two topics, two
+  files), answer EACH part separately, in order, under its own bold heading
+  like **Part 1 — <topic>**, using the context that covers it. Do not drop a
+  part just because other parts dominate the context. If a part has no
+  supporting context, say so under its heading.
 - Cite every claim like [file.pdf p.N], where file.pdf is the source file
   name and N is the page number shown at the top of the context block.
 - If the context does not contain the answer, reply exactly:
