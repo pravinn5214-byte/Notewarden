@@ -13,14 +13,16 @@
 | Vision cost control | `ingest.py` | Ingest prints "~N pages will use the vision model"; `OCR_MAX_VISION_PAGES` (default 50) per run, excess pages fall back to Tesseract with a warning; sidebar shows whether pages leave the machine |
 | OCR engine comparison | `ocr_compare.py` | CER/WER + time per engine against a ground-truth .txt for one image/PDF page |
 | Idempotent indexing | `ingest.py` | Content-derived chunk IDs: re-ingesting never duplicates; stale children & parents removed; metadata refreshed |
-| Vector store | `chroma_db/` | ChromaDB persistent client, cosine distance (`notes` children + `parents` context) |
+| Vector store | `chroma_db/` | ChromaDB persistent client, cosine distance (`notes` children + `parents` context); single client factory in `store.py` (`CHROMA_DIR` env var, default `chroma_db/`), auto-recovery from stale HNSW segments (`with_index_recovery`: reopen client, retry once, then `IndexCorruptError`) |
+| Index repair | `app.py` sidebar + `ingest.py` | **🛠️ Repair index** button deletes and rebuilds both collections from `docs/` (OCR cache reused, so scanned pages aren't re-OCR'd) and shows the chunk count; app startup, ingest CLI, and the chat flow health-check the index and show the repair prompt instead of crashing |
+| Write lock | `store.py` | PID lockfile (`.ingest.lock`, stale detection) serializes ingestion/deletes between the app and the CLI; a second writer exits/warns with "The app (or another ingest) is running; stop it first"; dead-PID locks are reclaimed; reads never lock |
 | Semantic retrieval | `retrieve.py` | `all-MiniLM-L6-v2` sentence-transformer; top-k chunks with similarity scores |
 | Hybrid search | `retrieve.py` | BM25 (rank_bm25) over children + dense, fused with RRF (k=60), top-20 each; punctuation-aware tokenizer with stopwords |
 | Re-ranking | `retrieve.py` | Cross-encoder `ms-marco-MiniLM-L-6-v2`; parents deduped, best child's score kept |
 | Parent-child chunks | `ingest.py` | 120-word children (matched) + 500-word page-aware parents (LLM context); both content-derived IDs, both cleaned on delete |
-| Retrieval modes | `app.py` sidebar | `dense` / `hybrid` / `hybrid_rerank` (default); also `RETRIEVAL_MODE` env var |
-| Relevance gate | `generate.py` | Gates on dense cosine (mode-independent), `MIN_SCORE` = 0.3 |
-| Sources panel | `app.py` | Shows dense score, BM25 rank, rerank score, file, page per result |
+| Retrieval modes | `app.py` sidebar | `dense` / `hybrid` / `hybrid_rerank` (default everywhere: sidebar, `RETRIEVAL_MODE` fallback, CLI); selecting `dense` shows a caption that it can miss one topic in multi-topic questions |
+| Relevance gate | `generate.py` | Gates on dense cosine (mode-independent), `MIN_SCORE` = 0.3; applied per sub-query in multi-topic retrieval |
+| Sources panel | `app.py` | Shows dense score, BM25 rank, rerank score, file, page per result; decomposed answers group sources by sub-question and mark unsupported ones "no relevant notes found" |
 | Grounded generation | `generate.py` | LLM answers only from context, cites as `[file p.N]`; multi-topic questions answered per part (`**Part N — <topic>**` headings, each part cited or flagged as unsupported) |
 | Multi-topic questions (query decomposition) | `decompose.py` + `retrieve.py` + `generate.py` | One short LLM call splits multi-topic questions into self-contained sub-queries (JSON, validated, LRU-cached); `DECOMPOSE=off` or the sidebar checkbox disables it; cheap skip rule avoids the LLM for simple questions |
 | Per-sub-query gating & guaranteed-slot merge | `retrieve.py` `retrieve_multi` | Each sub-query retrieved in the chosen mode and gated on dense cosine separately; merge guarantees min(2, top_k) slots per supported topic, dedupes by parent (all matching sub-query indices kept), budget `DECOMPOSE_MAX_CONTEXT` (8) |
@@ -55,6 +57,7 @@
 - [x] **Re-ranking** — cross-encoder `ms-marco-MiniLM-L-6-v2` on the fused top-20 — `hybrid_rerank` mode (default)
 - [x] **Parent-child chunks** — 120-word children for matching, 500-word page-aware parents for LLM context — `ingest.py`
 - [x] **OCR for scanned pages & images** — Tesseract + vision engines (Claude / Ollama) via `ocr.py` (`OcrEngine` interface), with `auto` escalation and engine comparison (`ocr_compare.py`)
+- [x] **Query decomposition for multi-topic questions** — `decompose.py` splits a question into per-topic sub-queries; per-sub-query gating + guaranteed-slot merge in `retrieve_multi`; parts-aware prompts in `generate.py`; measured by `evaluate.py --multitopic`
 - [ ] Better OCR models — plug a stronger vision LLM behind `ocr.py`'s `OcrEngine` interface
 - [ ] Better chunking — respect headings/paragraph boundaries instead of fixed word windows
 - [ ] Metadata filters (by file, page range) in the UI
@@ -71,5 +74,4 @@
 - [ ] Conversation memory — feed the last N turns back so follow-up questions work
 
 ### Ops
-- [ ] Tests for ingest/retrieve round-trip (currently none)
 - [ ] Logging of queries + retrieval scores to spot weak spots
