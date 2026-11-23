@@ -28,14 +28,15 @@
 | Per-sub-query gating & guaranteed-slot merge | `retrieve.py` `retrieve_multi` | Each sub-query retrieved in the chosen mode and gated on dense cosine separately; merge guarantees min(2, top_k) slots per supported topic, dedupes by parent (all matching sub-query indices kept), budget `DECOMPOSE_MAX_CONTEXT` (8) |
 | Multi-topic answers | `generate.py` | `answer_as_parts=true` → per-part `**Part N — <topic>**` headings with grouped context; comparisons → one integrated answer; unsupported topics listed as "No relevant notes found for: …" |
 | Multi-topic evaluation | `evaluate.py --multitopic` + `eval_multitopic.json` | "Both topics covered in top-k" rate, decompose off vs on, per mode/k; `--write` saves `eval_results_multitopic.md` |
+| Agentic mode (bounded) | `agent.py` + `app.py` | Follow-up rewrite using recent turns (`AGENT_HISTORY_TURNS`, 4), one bounded retrieval retry on weak results (`AGENT_MAX_RETRIES`, 1), optional sufficiency check (`AGENT_SUFFICIENCY_CHECK=auto`), clarify-by-rule (vague query or retrieval still failing) with LLM-phrased question + template fallback; "How I searched" trace expander; every LLM decision is validated JSON with safe fallback; sidebar toggle `AGENT_MODE`; conversation history passed into generation |
 | Two LLM providers | `generate.py` | `claude` (Anthropic API) or `ollama` (local, e.g. `llama3.2`), picked via `LLM_PROVIDER`; shared `complete()` helper also powers decomposition |
 | Chat UI | `app.py` | Streamlit chat with message history (per browser session), Sources expander per answer |
 | Tunable parameters | `app.py` sidebar | Child/parent chunk size, top-k (1–10), retrieval mode |
 | Retrieval evaluation | `evaluate.py` + `eval_questions.json` | 45 tagged questions (keyword/semantic); all 3 modes at k=3/5 with bootstrap 95% CIs; per-tag breakdown; results in `eval_results.md` |
 | Parent-child ablation | `ablation.py` | LLM-as-judge check that parent vs child context contains the answer |
-| Tests | `tests/test_retrieval.py`, `tests/test_ocr.py`, `tests/test_ocr_vision.py`, `tests/test_store.py`, `tests/test_decompose.py`, `tests/test_multitopic_retrieval.py`, `tests/test_generate_parts.py` | Round trip, idempotency, delete cleanup, RRF maths, parent dedupe, tokenizer, clean_text; OCR: image-only PDF ingests + is retrievable, text-layer PDF not OCR'd, cache hit, graceful no-Tesseract (skipped if Tesseract absent); vision: auto escalation, per-engine cache keys, API-failure fallback, page cap, engine metadata; store: index-error recovery, write lock, repair parity, defaults; decomposition: skip rule, split, fallbacks, cache; multi-topic retrieval: both topics covered in all modes, single-file multi-page, old-path parity, per-sub-query gate, dedupe, guaranteed slots, context budget; parts prompts (all fakes, no network, tmp CHROMA_DIR) |
+| Tests | `tests/test_retrieval.py`, `tests/test_ocr.py`, `tests/test_ocr_vision.py`, `tests/test_store.py`, `tests/test_decompose.py`, `tests/test_multitopic_retrieval.py`, `tests/test_generate_parts.py`, `tests/test_agent.py` | Round trip, idempotency, delete cleanup, RRF maths, parent dedupe, tokenizer, clean_text; OCR: image-only PDF ingests + is retrievable, text-layer PDF not OCR'd, cache hit, graceful no-Tesseract (skipped if Tesseract absent); vision: auto escalation, per-engine cache keys, API-failure fallback, page cap, engine metadata; store: index-error recovery, write lock, repair parity, defaults; decomposition: skip rule, split, fallbacks, cache; multi-topic retrieval: both topics covered in all modes, single-file multi-page, old-path parity, per-sub-query gate, dedupe, guaranteed slots, context budget; parts prompts; agent: strong retrieval no-retry, retry-then-answer, clarify-once, invalid-JSON fallbacks, rewrite-uses-history, skip rule, AGENT_MODE=off parity, trace hygiene (all fakes, no network, tmp CHROMA_DIR) |
 | CLI pipeline | all modules | `python ingest.py`, `retrieve.py "q" --mode hybrid_rerank`, `generate.py "q"` — full pipeline without the UI |
-| Config | `.env` | `LLM_PROVIDER`, `OLLAMA_MODEL`, `ANTHROPIC_API_KEY`, `RETRIEVAL_MODE`, `DECOMPOSE`, `DECOMPOSE_MAX_SUBQUERIES`, `DECOMPOSE_MAX_CONTEXT`, `TESSERACT_CMD`, `OCR_LANG`, `OCR_MIN_CHARS`, `OCR_PREPROCESS`, `OCR_ENGINE`, `OCR_VISION_ENGINE`, `OCR_CONF_THRESHOLD`, `OCR_CLAUDE_MODEL`, `OCR_OLLAMA_MODEL`, `OCR_MAX_VISION_PAGES` |
+| Config | `.env` | `LLM_PROVIDER`, `OLLAMA_MODEL`, `ANTHROPIC_API_KEY`, `RETRIEVAL_MODE`, `DECOMPOSE`, `DECOMPOSE_MAX_SUBQUERIES`, `DECOMPOSE_MAX_CONTEXT`, `AGENT_MODE`, `AGENT_HISTORY_TURNS`, `AGENT_MAX_RETRIES`, `AGENT_SUFFICIENCY_CHECK`, `TESSERACT_CMD`, `OCR_LANG`, `OCR_MIN_CHARS`, `OCR_PREPROCESS`, `OCR_ENGINE`, `OCR_VISION_ENGINE`, `OCR_CONF_THRESHOLD`, `OCR_CLAUDE_MODEL`, `OCR_OLLAMA_MODEL`, `OCR_MAX_VISION_PAGES` |
 
 ## 🔮 What we could do next
 
@@ -58,6 +59,7 @@
 - [x] **Parent-child chunks** — 120-word children for matching, 500-word page-aware parents for LLM context — `ingest.py`
 - [x] **OCR for scanned pages & images** — Tesseract + vision engines (Claude / Ollama) via `ocr.py` (`OcrEngine` interface), with `auto` escalation and engine comparison (`ocr_compare.py`)
 - [x] **Query decomposition for multi-topic questions** — `decompose.py` splits a question into per-topic sub-queries; per-sub-query gating + guaranteed-slot merge in `retrieve_multi`; parts-aware prompts in `generate.py`; measured by `evaluate.py --multitopic`
+- [x] **Bounded agentic flow** — retry retrieval on weak results, clarifying question when stuck — `agent.py` (`AGENT_MAX_RETRIES`, clarify-by-rule, trace); measured by `evaluate.py --agent`
 - [ ] Better OCR models — plug a stronger vision LLM behind `ocr.py`'s `OcrEngine` interface
 - [ ] Better chunking — respect headings/paragraph boundaries instead of fixed word windows
 - [ ] Metadata filters (by file, page range) in the UI
@@ -71,7 +73,7 @@
 ### Model & cost
 - [ ] Show which model answered + rough token usage
 - [ ] Streaming answers (Ollama & Anthropic both support it)
-- [ ] Conversation memory — feed the last N turns back so follow-up questions work
+- [x] Conversation memory — last N turns fed back (`AGENT_HISTORY_TURNS`) + follow-up rewrite in `agent.py`
 
 ### Ops
 - [ ] Logging of queries + retrieval scores to spot weak spots
