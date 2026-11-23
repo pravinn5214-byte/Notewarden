@@ -1,10 +1,10 @@
 [
-  {"question": "What is normal form in databases and why does it matter?", "type": "answerable", "expected_source": "170.pdf", "note": "answerable from notes; strong retrieval expected, no clarify"},
+  {"question": "What is a G-quadruplex and how does it form?", "type": "answerable", "expected_source": "170.pdf", "note": "answerable from notes; strong retrieval expected, no clarify"},
   {"question": "Tell me about that thing we discussed", "type": "vague", "note": "no resolvable referent, no history -> should clarify"},
   {"question": "protein", "type": "vague", "note": "single word, no history -> should clarify"},
   {"question": "How does protein folding work?", "type": "rewrite", "expected_source": "170.pdf", "note": "should be answered directly; included to measure unnecessary clarify"},
   {"question": "What is the Tagverse CRM invoice numbering format?", "type": "answerable", "expected_source": "Tagverse_White_CRM_Checklist_Updated.pdf"},
-  {"question": "Explain the central dogma of molecular biology", "type": "answerable", "expected_source": "170.pdf"},
+  {"question": "How does the DNA backbone differ from RNA?", "type": "answerable", "expected_source": "170.pdf"},
   {"question": "What is quantum chromodynamic confinement in quark-gluon plasma?", "type": "unanswerable", "note": "not in the notes -> clarify or report not-found, never a guess"},
   {"question": "Summarize the peloponnesian war", "type": "unanswerable", "note": "not in the notes -> clarify or report not-found"},
   {"question": "What are the hydrogen bonds between adenine and thymine?", "type": "rewrite", "expected_source": "170.pdf"},
