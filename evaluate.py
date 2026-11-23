@@ -32,6 +32,7 @@ from pathlib import Path
 
 from ingest import CHILD_SIZE, ingest_pdfs
 from retrieve import MODES, retrieve, retrieve_multi
+from generate import FALLBACK_MESSAGE
 
 EVAL_FILE = Path("eval_questions.json")
 RESULTS_FILE = Path("eval_results.md")
@@ -156,9 +157,86 @@ def run_multitopic(sizes: list[int], write: bool) -> None:
         print(f"Saved to {out}")
 
 
+AGENT_FILE = Path("eval_agent.json")
+
+
+def run_agent_eval(db_dir: str, llm=None) -> dict:
+    """--agent: recovered-after-retry rate, clarify precision, unnecessary-
+    clarify rate, and answer-rate on unanswerable questions."""
+    from agent import answer_with_agent
+
+    questions = load_questions(AGENT_FILE)
+    stats = {
+        "n": len(questions),
+        "recovered_after_retry": 0, "retry_used": 0,
+        "clarified": 0, "should_clarify": 0,
+        "clarified_correctly": 0, "unnecessary_clarify": 0,
+        "unanswerable_answered": 0, "unanswerable_n": 0,
+        "answered_strong": 0,
+    }
+    for q in questions:
+        result = answer_with_agent(q["question"], history=[], mode="hybrid_rerank",
+                                   top_k=4, db_dir=db_dir, llm=llm)
+        qtype = q.get("type", "answerable")
+        retry = bool(result.trace.get("retry"))
+        clarified = result.action == "clarify"
+        if retry:
+            stats["retry_used"] += 1
+        if clarified:
+            stats["clarified"] += 1
+        if qtype == "vague":
+            stats["should_clarify"] += 1
+            if clarified:
+                stats["clarified_correctly"] += 1
+        elif clarified:
+            stats["unnecessary_clarify"] += 1
+        if qtype == "unanswerable":
+            stats["unanswerable_n"] += 1
+            if not clarified and result.answer_or_question != FALLBACK_MESSAGE:
+                stats["unanswerable_answered"] += 1
+    return stats
+
+
+def print_agent_report(stats: dict) -> None:
+    n = max(1, stats["n"])
+    un_n = max(1, stats["unanswerable_n"])
+    lines = [
+        "## Agent evaluation",
+        "",
+        f"- Questions: {stats['n']}",
+        f"- Retries used: {stats['retry_used']}",
+        f"- Recovered after retry: not directly observable offline; retry rate {stats['retry_used'] / n:.0%}",
+        f"- Clarify precision: {stats['clarified_correctly']}/{stats['should_clarify']} vague questions clarified"
+        f" ({stats['clarified_correctly'] / max(1, stats['should_clarify']):.0%})",
+        f"- Unnecessary clarifies: {stats['unnecessary_clarify']} of {stats['n']} ({stats['unnecessary_clarify'] / n:.0%})",
+        f"- Unanswerable questions answered anyway: {stats['unanswerable_answered']}/{stats['unanswerable_n']}"
+        f" ({stats['unanswerable_answered'] / un_n:.0%} — should be 0%)",
+    ]
+    report = "\n".join(lines)
+    print(report)
+    return report
+
+
+def run_agent(sizes: list[int], write: bool, llm=None) -> None:
+    for child_size in sizes:
+        db_dir = f"{DB_DIR}_{child_size}"
+        print(f"Ingesting at child size {child_size} into {db_dir}/ ...")
+        ingest_pdfs(child_size=child_size, child_overlap=OVERLAP, db_dir=db_dir)
+        stats = run_agent_eval(db_dir, llm=llm)
+        report = print_agent_report(stats)
+        if write:
+            out = Path("eval_results_agent.md")
+            out.write_text(report + "\n", encoding="utf-8")
+            print(f"Saved to {out}")
+
+
 def main() -> None:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     ablation = "--ablation" in sys.argv
+    if "--agent" in sys.argv:
+        sizes = [int(a) for a in args] or [CHILD_SIZE]
+        run_agent(sizes, write="--write" in sys.argv)
+        return
     if "--multitopic" in sys.argv:
         sizes = [int(a) for a in args] or [CHILD_SIZE]
         run_multitopic(sizes, write="--write" in sys.argv)

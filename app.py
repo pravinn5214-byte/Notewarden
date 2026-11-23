@@ -16,6 +16,7 @@ from ingest import IMAGE_EXTENSIONS, ingest_pdfs
 from ocr import is_tesseract_available
 from retrieve import DEFAULT_MODE, MODES, invalidate_bm25_cache, retrieve, retrieve_multi
 from decompose import Decomposition, decompose
+from agent import answer_with_agent
 from store import (  # noqa: F401  (re-exported for callers/tests)
     IndexCorruptError, LockHeldError, acquire_write_lock, db_path,
     get_client, get_collections, health_check, release_write_lock,
@@ -168,6 +169,14 @@ with st.sidebar:
     )
     if decompose_enabled:
         st.caption("Adds one short LLM call for multi-part questions.")
+    agent_mode = st.checkbox(
+        "Agentic mode",
+        value=os.environ.get("AGENT_MODE", "on").lower() != "off",
+        help="Retries retrieval when results are weak and asks a clarifying "
+             "question when stuck (max one retry and one clarification per turn).",
+    )
+    if agent_mode:
+        st.caption("One extra LLM call only when retrieval is weak.")
 
     if st.button("🗑️ Process documents", use_container_width=True):
         if not selected:
@@ -267,6 +276,23 @@ def _source_line(s: dict) -> None:
     st.text(s["text"][:600] + ("..." if len(s["text"]) > 600 else ""))
 
 
+def _render_trace(trace: dict) -> None:
+    """Collapsed 'How I searched' expander with the agent trace (no document text)."""
+    if not trace or not trace.get("steps"):
+        return
+    with st.expander("How I searched"):
+        for entry in trace.get("steps", []):
+            name = entry.get("step", "?")
+            bits = [f"**{name}**"]
+            bits += [f"{k}: {v}" for k, v in entry.items()
+                     if k != "step" and v not in (None, False)]
+            st.markdown(" · ".join(bits))
+        if trace.get("queries_tried"):
+            st.caption("Queries tried: " + " → ".join(trace["queries_tried"]))
+        if trace.get("clarify"):
+            st.caption(f"Clarified because: {trace['clarify'].get('reason', 'unknown')}")
+
+
 # --- Main: chat ----------------------------------------------------------
 st.title("💬 Chat with your notes")
 
@@ -288,6 +314,35 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
 
     with st.chat_message("assistant"):
         allowed_names = [p.name for p in selected]
+        history_msgs = [m for m in st.session_state.messages
+                        if m["role"] in ("user", "assistant")][-8:]
+        if agent_mode:
+            try:
+                result = answer_with_agent(
+                    question, history=history_msgs, mode=mode, top_k=top_k,
+                    files=allowed_names,
+                )
+            except IndexCorruptError:
+                st.error("The index looks out of sync. Click **Repair index** in the sidebar.")
+                st.stop()
+            except RuntimeError as exc:  # missing/empty store
+                st.error(str(exc))
+                st.stop()
+            st.markdown(result.answer_or_question)
+            if result.sources:
+                _render_sources(result.sources,
+                                result.trace.get("decomposition_subqueries"),
+                                result.trace.get("supported"))
+            _render_trace(result.trace)
+            if result.action == "answer":
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": result.answer_or_question,
+                     "sources": result.sources})
+            else:
+                st.session_state.messages.append(
+                    {"role": "assistant", "text": result.answer_or_question,
+                     "clarify": True})
+            st.stop()
         with st.spinner("Splitting question..." if decompose_enabled else None):
             decomposition = decompose(question) if decompose_enabled else None
         try:

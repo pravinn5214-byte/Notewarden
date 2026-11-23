@@ -25,15 +25,26 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_DEFAULT_MODEL = "llama3.2"  # override with the OLLAMA_MODEL env var
 
 
-def build_prompt(question: str, chunks: list[dict]) -> str:
-    """Build the grounded prompt: context blocks + strict answer rules."""
+def build_prompt(question: str, chunks: list[dict], history: list[dict] | None = None) -> str:
+    """Build the grounded prompt: context blocks + strict answer rules.
+
+    history: optional recent turns ([{"role": "user"|"assistant", "text": ...}],
+    oldest first) so the model can resolve follow-up references.
+    """
+    history_block = ""
+    if history:
+        turns = "\n".join(f"{h['role']}: {h['text']}" for h in history)
+        history_block = f"""Recent conversation (for resolving references in the question):
+{turns}
+
+"""
     context_blocks = "\n\n".join(
         f"[{c['source']} p.{c['page']}]\n{c['text']}" for c in chunks
     )
     return f"""Answer the question using ONLY the context below, which is
 excerpted from the user's study notes.
 
-Rules:
+{history_block}Rules:
 - Use only facts stated in the context. Do not use outside knowledge.
 - If the question asks about several distinct things (e.g. two topics, two
   files), answer EACH part separately, in order, under its own bold heading
@@ -243,7 +254,7 @@ Answer:"""
 
 
 def generate_answer(question: str, chunks: list[dict], min_score: float = MIN_SCORE,
-                    decomposition=None) -> str:
+                    decomposition=None, history: list[dict] | None = None) -> str:
     """Return a grounded answer with citations, or the fallback message.
 
     The gate uses "dense_score" (cosine similarity, present in every result
@@ -268,7 +279,7 @@ def generate_answer(question: str, chunks: list[dict], min_score: float = MIN_SC
             question, chunks, decomposition.subqueries,
             decomposition.answer_as_parts, supported)
     else:
-        prompt = build_prompt(question, chunks)
+        prompt = build_prompt(question, chunks, history=history)
 
     if provider == "claude":
         api_key = os.environ.get("ANTHROPIC_API_KEY")
