@@ -68,8 +68,12 @@ def check_store_ready() -> list[str]:
 # --- Session state -----------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []  # {"role": "user"|"assistant", "text": ..., "sources": [...]}
+if "session_id" not in st.session_state:
+    import uuid
+    st.session_state.session_id = uuid.uuid4().hex[:12]  # browser-session tag for query_log
 
 # --- Sidebar -------------------------------------------------------------------
+
 with st.sidebar:
     st.title("📚 Study Assistant")
 
@@ -250,6 +254,35 @@ with st.sidebar:
     st.caption(f"LLM provider: **{provider}**"
                + (f" ({os.environ.get('OLLAMA_MODEL', OLLAMA_DEFAULT_MODEL)})" if provider == "ollama" else ""))
 
+    # Query log: the 10 weakest recent queries, to spot retrieval gaps.
+    with st.expander("🔍 Query log", expanded=False):
+        try:
+            from query_log import enabled, rows_since
+            if not enabled():
+                st.caption("Query logging is off (QUERY_LOG=off).")
+            else:
+                rows = rows_since()
+                logged = [r for r in rows if r["top_dense_score"] is not None][:10]
+                if not logged:
+                    st.caption("No queries logged yet.")
+                else:
+                    for r in logged:
+                        q = r["original_query"] or ""
+                        if len(q) > 80:
+                            q = q[:77] + "..."
+                        st.markdown(f"`{r['top_dense_score']:.2f}` · {q}")
+                        bits = [f"{r['ts'][:16]}", r["retrieval_mode"] or "-"]
+                        if r["gated_out"]:
+                            bits.append("gated out")
+                        if r["clarified"]:
+                            bits.append("clarified")
+                        if (r["retries"] or 0) > 0:
+                            bits.append(f"{r['retries']} retry")
+                        st.caption(" · ".join(bits))
+                    st.caption(f"{len(rows)} query(ies) logged · `python log_report.py` for the full report")
+        except Exception as exc:
+            st.caption(f"Query log unavailable: {exc}")
+
 def _render_sources(sources: list[dict], subqueries: list[str] | None = None,
                     supported: set | None = None) -> None:
     """Sources expander body: grouped by sub-question when decomposed."""
@@ -308,6 +341,8 @@ for msg in st.session_state.messages:
             _render_sources(msg["sources"], msg.get("subqueries"), msg.get("supported"))
 
 if question := st.chat_input("Ask about your notes...", disabled=bool(blockers)):
+    import time as _time
+    _plain_turn_start = _time.monotonic()
     st.session_state.messages.append({"role": "user", "text": question})
     with st.chat_message("user"):
         st.markdown(question)
@@ -372,6 +407,32 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
                 st.stop()
         st.markdown(answer)
         _render_sources(hits, decomposition.subqueries if decomposition else None, supported)
+
+        # Query log (best-effort, never breaks the app).
+        import time as _time
+        from query_log import log_query, results_payload, top_dense, gated
+        try:
+            subs = decomposition.subqueries if decomposition else []
+            from generate import MIN_SCORE as _gate
+            log_query(
+                session_id=st.session_state.get("session_id", ""),
+                original_query=question,
+                retrieval_mode=mode,
+                top_k=top_k,
+                decompose_used=bool(subs and len(subs) > 1),
+                agent_mode=False,
+                sub_queries=subs if len(subs) > 1 else None,
+                results=results_payload(hits),
+                top_dense_score=top_dense(hits),
+                gated_out=gated(hits, _gate),
+                unsupported_topics=[subs[i] for i in range(len(subs))
+                                    if i not in supported] if len(subs) > 1 else [],
+                llm_provider=os.environ.get("LLM_PROVIDER", "claude"),
+                latency_ms=(_time.monotonic() - _plain_turn_start) * 1000.0,
+                answer=answer,
+            )
+        except Exception:  # logging must never break the app
+            pass
 
     st.session_state.messages.append(
         {"role": "assistant", "text": answer, "sources": hits,

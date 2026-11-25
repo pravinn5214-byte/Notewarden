@@ -296,12 +296,35 @@ def generate_answer(question: str, chunks: list[dict], min_score: float = MIN_SC
 
 if __name__ == "__main__":
     import sys
+    import time
+    import os as _os
 
     from retrieve import retrieve
+    from query_log import log_query, results_payload, top_dense, gated
 
     if len(sys.argv) < 2:
         raise SystemExit('Usage: python generate.py "your question"')
     q = " ".join(sys.argv[1:])
-    hits = retrieve(q)
-    print(f"best score: {hits[0]['score']:.2f} (threshold {MIN_SCORE})\n")
-    print(generate_answer(q, hits))
+    _t0 = time.monotonic()
+    _error = None
+    hits, answer = [], None
+    try:
+        hits = retrieve(q)
+        print(f"best score: {hits[0]['score']:.2f} (threshold {MIN_SCORE})\n")
+        answer = generate_answer(q, hits)
+        print(answer)
+    except Exception as exc:
+        _error = str(exc)
+        raise
+    finally:
+        log_query(
+            original_query=q,
+            retrieval_mode=_os.environ.get("RETRIEVAL_MODE", "hybrid_rerank"),
+            results=results_payload(hits),
+            top_dense_score=top_dense(hits),
+            gated_out=gated(hits, MIN_SCORE),
+            llm_provider=_os.environ.get("LLM_PROVIDER", "claude"),
+            latency_ms=(time.monotonic() - _t0) * 1000.0,
+            error=_error,
+            answer=answer,
+        )

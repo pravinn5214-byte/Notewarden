@@ -14,6 +14,10 @@ import pytest
 # chroma_db/, even if a test forgets to pass db_dir=.
 _REAL_DB = Path(__file__).resolve().parents[1] / "chroma_db"
 os.environ.setdefault("CHROMA_DIR", str(Path(__file__).parent / "_test_chroma_db"))
+# Same isolation for the query log: tests that call the agent/app pipeline
+# must never write into the real logs/queries.db.
+os.environ["QUERY_LOG"] = "on"
+os.environ["QUERY_LOG_PATH"] = str(Path(__file__).parent / "_test_query_log" / "queries.db")
 
 
 @pytest.fixture(scope="session", autouse=True)

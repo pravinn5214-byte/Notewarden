@@ -36,6 +36,9 @@
 | Parent-child ablation | `ablation.py` | LLM-as-judge check that parent vs child context contains the answer |
 | Tests | `tests/test_retrieval.py`, `tests/test_ocr.py`, `tests/test_ocr_vision.py`, `tests/test_store.py`, `tests/test_decompose.py`, `tests/test_multitopic_retrieval.py`, `tests/test_generate_parts.py`, `tests/test_agent.py` | Round trip, idempotency, delete cleanup, RRF maths, parent dedupe, tokenizer, clean_text; OCR: image-only PDF ingests + is retrievable, text-layer PDF not OCR'd, cache hit, graceful no-Tesseract (skipped if Tesseract absent); vision: auto escalation, per-engine cache keys, API-failure fallback, page cap, engine metadata; store: index-error recovery, write lock, repair parity, defaults; decomposition: skip rule, split, fallbacks, cache; multi-topic retrieval: both topics covered in all modes, single-file multi-page, old-path parity, per-sub-query gate, dedupe, guaranteed slots, context budget; parts prompts; agent: strong retrieval no-retry, retry-then-answer, clarify-once, invalid-JSON fallbacks, rewrite-uses-history, skip rule, AGENT_MODE=off parity, trace hygiene (all fakes, no network, tmp CHROMA_DIR) |
 | CLI pipeline | all modules | `python ingest.py`, `retrieve.py "q" --mode hybrid_rerank`, `generate.py "q"` — full pipeline without the UI |
+| Query logging | `query_log.py` + `agent.py` + `app.py` + `generate.py` | One SQLite row per query (default `logs/queries.db`): rewritten query, retrieval mode, top-k, decompose/agent flags, sub-queries, per-result scores ({file, page, dense_score, bm25_rank, rerank_score, ocr} — never chunk text), top dense score, gated-out, unsupported topics, retries, clarified, provider, latency, error; `QUERY_LOG=off` disables; answer text only with `QUERY_LOG_ANSWERS=on`; API keys never stored; every hook is best-effort (try/except + warning — logging can't break a query) |
+| Query log report | `log_report.py` | CLI: total queries, no-answer/gated-out rate, clarify rate, retry rate, average + p95 latency, 10 lowest top_dense_score queries, most-used files; `--since 7d` (also 24h/4w/2mo) and `--csv out.csv` |
+| Query log sidebar | `app.py` | "🔍 Query log" expander: the 10 weakest recent queries (score + mode + gated/clarified/retry badges) |
 | Config | `.env` | `LLM_PROVIDER`, `OLLAMA_MODEL`, `ANTHROPIC_API_KEY`, `RETRIEVAL_MODE`, `DECOMPOSE`, `DECOMPOSE_MAX_SUBQUERIES`, `DECOMPOSE_MAX_CONTEXT`, `AGENT_MODE`, `AGENT_HISTORY_TURNS`, `AGENT_MAX_RETRIES`, `AGENT_SUFFICIENCY_CHECK`, `TESSERACT_CMD`, `OCR_LANG`, `OCR_MIN_CHARS`, `OCR_PREPROCESS`, `OCR_ENGINE`, `OCR_VISION_ENGINE`, `OCR_CONF_THRESHOLD`, `OCR_CLAUDE_MODEL`, `OCR_OLLAMA_MODEL`, `OCR_MAX_VISION_PAGES` |
 
 ## 🔮 What we could do next
@@ -76,4 +79,4 @@
 - [x] Conversation memory — last N turns fed back (`AGENT_HISTORY_TURNS`) + follow-up rewrite in `agent.py`
 
 ### Ops
-- [ ] Logging of queries + retrieval scores to spot weak spots
+- [x] Logging of queries + retrieval scores to spot weak spots — `query_log.py` + `log_report.py` + sidebar "🔍 Query log" expander

@@ -288,10 +288,45 @@ def answer_with_agent(
     """
     from generate import MIN_SCORE
     import store as store_mod
+    import time as _time
 
     history = history or []
     recent = history[-HISTORY_TURNS:]
     trace: dict = {"steps": [], "queries_tried": [], "retry": False, "clarify": None}
+    _turn_start = _time.monotonic()
+
+    def _log_turn(action: str, text: str, hits: list[dict], supported: set,
+                  decomposition) -> None:
+        """Query log: best-effort, never breaks the turn (log_query itself
+        swallows errors; this wrapper guards field extraction too)."""
+        try:
+            import os as _os
+            from query_log import log_query, results_payload, top_dense, gated
+            from generate import MIN_SCORE as _gate
+            subqueries = decomposition.subqueries if decomposition is not None else []
+            multi = len(subqueries) > 1
+            log_query(
+                session_id=_os.environ.get("QUERY_LOG_SESSION_ID", ""),
+                original_query=question,
+                rewritten_query=trace.get("rewritten_query"),
+                retrieval_mode=mode,
+                top_k=top_k,
+                decompose_used=multi,
+                agent_mode=True,
+                sub_queries=subqueries if multi else None,
+                results=results_payload(hits),
+                top_dense_score=top_dense(hits),
+                gated_out=action != "clarify" and gated(hits, _gate),
+                unsupported_topics=[subqueries[i] for i in range(len(subqueries))
+                                    if i not in supported] if multi else [],
+                retries=1 if trace.get("retry") else 0,
+                clarified=action == "clarify",
+                llm_provider=_os.environ.get("LLM_PROVIDER", "claude"),
+                latency_ms=(_time.monotonic() - _turn_start) * 1000.0,
+                answer=text if action == "answer" else None,
+            )
+        except Exception as exc:
+            logger.warning("Query logging failed (ignored): %s", exc)
 
     def step(name: str, **info) -> None:
         entry = {"step": name, **info}
@@ -330,12 +365,16 @@ def answer_with_agent(
     if not strong:
         if prev_was_clarify:
             step("no_more_clarify", reason="previous turn was a clarification")
+            _log_turn("answer",
+                      "I couldn't find that in your notes. Try different words or upload notes covering it.",
+                      hits, supported, decomposition)
             return AgentResult("answer",
                                "I couldn't find that in your notes. Try different words or upload notes covering it.",
                                [], trace)
         cq, ct = phrase_clarifying_question(question, "no relevant notes were found", llm=llm)
         step("clarify", reason="retrieval_failed_after_retry")
         trace["clarify"] = {"reason": "retrieval_failed_after_retry", **ct}
+        _log_turn("clarify", cq, [], supported, decomposition)
         return AgentResult("clarify", cq, [], trace)
 
     # (d) Optional sufficiency check.
@@ -347,10 +386,12 @@ def answer_with_agent(
         cq, ct = phrase_clarifying_question(question, "the found notes do not seem to answer it fully", llm=llm)
         step("clarify", reason="insufficient_context")
         trace["clarify"] = {"reason": "insufficient_context", **ct}
+        _log_turn("clarify", cq, [], supported, decomposition)
         return AgentResult("clarify", cq, [], trace)
 
     # (f) Grounded answer through the existing path.
     from generate import generate_answer
     answer = generate_answer(question, hits, decomposition=decomposition, history=recent)
     step("answer")
+    _log_turn("answer", answer, hits, supported, decomposition)
     return AgentResult("answer", answer, hits, trace)
