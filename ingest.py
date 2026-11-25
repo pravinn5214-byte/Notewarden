@@ -46,6 +46,33 @@ CHILD_SIZE = 120   # words per child chunk
 CHILD_OVERLAP = 20
 PARENT_SIZE = 500  # words per parent chunk (page-aware)
 
+# --- Chunking mode --------------------------------------------------------------
+# CHUNKING=window  (default) fixed word windows — the original behaviour.
+# CHUNKING=heading split each page at its detected headings, so a chunk never
+#                  crosses a section boundary; sections get `section` metadata.
+# Read per ingest run (not at import) so the app, CLI and tests can switch
+# modes without re-importing; unknown values fall back to window.
+CHUNKING_WINDOW = "window"
+CHUNKING_HEADING = "heading"
+DEFAULT_CHUNKING = CHUNKING_WINDOW
+# Short mode tag baked into every chunk ID so switching modes can never leave
+# a stale chunk that looks live (and repair/re-ingest swaps cleanly).
+_ID_MODE = {CHUNKING_WINDOW: "win", CHUNKING_HEADING: "head"}
+
+
+def chunking_mode() -> str:
+    """The active chunking mode ('window' or 'heading')."""
+    mode = (os.environ.get("CHUNKING", "") or DEFAULT_CHUNKING).strip().lower()
+    return mode if mode in (CHUNKING_WINDOW, CHUNKING_HEADING) else DEFAULT_CHUNKING
+
+
+def _normalize_chunking(value: str | None) -> str:
+    """None -> the CHUNKING env var; anything unknown -> window."""
+    if value is None:
+        return chunking_mode()
+    value = value.strip().lower()
+    return value if value in (CHUNKING_WINDOW, CHUNKING_HEADING) else DEFAULT_CHUNKING
+
 # Below this many non-whitespace chars, a page counts as scanned (no text
 # layer) and gets OCR'd instead. Overridable via OCR_MIN_CHARS in .env.
 OCR_MIN_CHARS_DEFAULT = 30
@@ -241,11 +268,261 @@ def chunk_words_page(text: str, size: int = PARENT_SIZE) -> Iterator[str]:
         yield " ".join(words[start:start + size])
 
 
-def _chunk_id(source: str, page: int, index: int, text: str) -> str:
+def _chunk_id(source: str, page: int, index: int, text: str,
+              mode: str = CHUNKING_WINDOW) -> str:
     """Deterministic ID; the text hash makes edits to a page produce a new
-    ID (old one gets cleaned up), identical reruns produce the same one."""
+    ID (old one gets cleaned up), identical reruns produce the same one.
+
+    `mode` is part of the ID ('win'/'head'): re-ingesting under a different
+    CHUNKING setting writes a different ID for the same page position, so the
+    stale-chunk sweep below removes the other mode's chunks instead of leaving
+    two chunkings mixed in one index.
+    """
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
-    return f"{source}-p{page}-c{index}-{digest}"
+    tag = _ID_MODE.get(mode, mode)
+    return f"{source}-p{page}-{tag}-c{index}-{digest}"
+
+
+# --- Heading detection ----------------------------------------------------------
+# A line counts as a heading when it is visually or structurally set apart from
+# the body text: noticeably bigger font, a short bold/numbered/prefixed label,
+# or a short label line ending in ':'. Everything is judged per page against
+# that page's body size (char-weighted), so a page with no size contrast still
+# gets its numbered/bold labels, and a page with no usable signal returns []
+# (-> window fallback for that page).
+
+_HEADING_SHAPE_RE = re.compile(
+    r"^(?:"
+    r"\d+(?:\.\d+)*[.)]?\s+\S"                        # 1. ... / 3.2 ... / 3) ...
+    r"|\(\s*(?:[ivx]+|\d+)\s*\)\s*\S"                 # (i) ... / (1) ...
+    r")",
+    re.IGNORECASE,
+)
+_PREFIX_LABEL_RE = re.compile(                        # SECTION A ... / Phase 2: ...
+    r"^(?:phase|section|chapter|unit|part|topic|module)\b[^\n]{0,80}",
+    re.IGNORECASE,
+)
+_COLON_LABEL_RE = re.compile(r"^\S[^:\n]{0,70}:\s*$")
+MAX_HEADING_WORDS = 16
+MAX_HEADING_CHARS = 90
+
+
+def _page_body_size(lines: list[tuple[float, int, str, str]]) -> float:
+    """Font size of the body text: the size covering the most characters.
+    (A plain median would be skewed by pages with many tiny bullet markers.)"""
+    weight: dict[float, int] = {}
+    for size, _flags, _font, text in lines:
+        if size:
+            weight[size] = weight.get(size, 0) + len(text)
+    return max(weight, key=weight.get) if weight else 0.0
+
+
+def _line_is_heading(text: str, size: float, flags: int, body: float,
+                     font: str = "") -> bool:
+    """Is this single line a section heading? (see module comment)"""
+    t = " ".join(text.split())
+    n_words = len(t.split())
+    letters = sum(1 for c in t if c.isalpha())
+    if letters < 2 or not 1 <= n_words <= MAX_HEADING_WORDS or len(t) > MAX_HEADING_CHARS:
+        return False
+    bold = bool(flags & 16) or "bold" in font.lower()
+    if body and size >= body * 1.15:
+        return True                                    # bigger than the body
+    if n_words <= 8 and _COLON_LABEL_RE.match(t):
+        return True                                    # "Structural features:"
+    if _HEADING_SHAPE_RE.match(t) and (bold or (body and size > body)):
+        return True                                    # numbered / (i) labels
+    if (_PREFIX_LABEL_RE.match(t) and (bold or (body and size > body))
+            and (n_words >= 3 or ":" in t)):
+        return True                                    # SECTION A ... / Phase 2: ...
+    if bold and body and size > body and n_words >= 2:
+        return True                                    # emphasised sub-heading
+    return False
+
+
+def detect_page_headings(page) -> list[str]:
+    """Heading lines of one PyMuPDF page, in reading order.
+
+    Returns [] for pages with no text layer (scanned pages that went through
+    OCR only yield a plain string) — callers fall back to window chunking for
+    such pages, which is the documented OCR/headingless fallback.
+    """
+    try:
+        info = page.get_text("dict")
+    except Exception:
+        return []
+    lines: list[tuple[float, int, str, str]] = []
+    for block in info.get("blocks", []) or []:
+        if block.get("type", 0) != 0:
+            continue
+        for line in block.get("lines", []) or []:
+            spans = [sp for sp in line.get("spans", []) if (sp.get("text") or "").strip()]
+            if not spans:
+                continue
+            text = "".join(sp.get("text", "") for sp in spans)
+            dominant = max(spans, key=lambda sp: len(sp.get("text", "")))
+            lines.append((
+                float(dominant.get("size") or 0),
+                int(dominant.get("flags") or 0),
+                str(dominant.get("font") or ""),
+                text,
+            ))
+    body = _page_body_size(lines)
+    out = []
+    for size, flags, font, text in lines:
+        if _line_is_heading(text, size, flags, body, font=font):
+            out.append(" ".join(text.split()))
+    return out
+
+
+def load_headings(pdf_path: Path) -> dict[int, list[str]]:
+    """Detected headings per page (1-based) for one PDF.
+
+    Pages whose text layer is missing/empty (they get OCR'd by load_pages)
+    are simply absent here — window chunking covers them.
+    """
+    try:
+        doc = pymupdf.open(pdf_path)
+    except Exception:
+        return {}
+    out: dict[int, list[str]] = {}
+    try:
+        for pno, page in enumerate(doc, start=1):
+            heads = detect_page_headings(page)
+            if heads:
+                out[pno] = heads
+    finally:
+        doc.close()
+    return out
+
+
+def split_sections(page_text: str, headings: list[str] | None
+                   ) -> list[tuple[str | None, str]]:
+    """Split a page's cleaned text at its headings.
+
+    Returns [(section_title | None, section_text), ...] where section_text
+    starts at its heading (so the title is already inside it). A heading that
+    cleaning moved/removed is skipped, and a page with no usable heading comes
+    back as one untitled section — i.e. exactly the window chunking.
+    """
+    if not headings:
+        return [(None, page_text)]
+    marks: list[tuple[int, str]] = []
+    cursor = 0
+    for h in headings:
+        h = clean_text(h)
+        if len(h) < 2:
+            continue
+        idx = page_text.find(h, cursor)
+        if idx < 0:
+            continue
+        marks.append((idx, h))
+        cursor = idx + len(h)
+    if not marks:
+        return [(None, page_text)]
+    # A heading followed (almost) immediately by the next one is a label in a
+    # table/list, not a section — e.g. the "Phase | Phase Name | Phase 1"
+    # header cells of a checklist table. Drop it as a boundary only; its words
+    # stay in the text, so nothing is lost but the cut.
+    kept: list[tuple[int, str]] = []
+    for i, (start, title) in enumerate(marks):
+        if i + 1 < len(marks):
+            between = page_text[start + len(title):marks[i + 1][0]]
+            if len(between.split()) < 3:
+                continue
+        kept.append((start, title))
+    marks = kept
+    if not marks:
+        return [(None, page_text)]
+    sections: list[tuple[str | None, str]] = []
+    lead = page_text[:marks[0][0]].strip() if marks[0][0] > 0 else ""
+    short_lead = ""
+    if lead:
+        if len(lead.split()) <= 3:
+            short_lead = lead   # too small to stand alone; fold in below
+        else:
+            sections.append((None, lead))
+    for i, (start, title) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(page_text)
+        body = page_text[start:end].strip()
+        if not body:
+            continue
+        # A heading with no content after it (page ended right there) is not a
+        # section of its own — fold it into the previous one instead of
+        # emitting a chunk that is only a title.
+        if sections and len(body.split()) <= len(title.split()):
+            ptitle, pbody = sections[-1]
+            sections[-1] = (ptitle, pbody + " " + body)
+        else:
+            sections.append((title, body))
+    # Same idea in the other direction: a lead-in too short to stand alone
+    # (usually table cells dropped by the adjacency rule above, which uses the
+    # same 3-word scale) joins the first section rather than becoming a
+    # 1-3 word chunk of its own.
+    if short_lead:
+        if sections:
+            title0, body0 = sections[0]
+            sections[0] = (title0, short_lead + " " + body0)
+        else:
+            sections.append((None, short_lead))
+    return sections or [(None, page_text)]
+
+
+def _with_section(title: str | None, text: str) -> str:
+    """Prepend the section title to a chunk that doesn't already start with
+    it (only a section's first chunk contains the heading itself), so BM25 and
+    the embedder see the section name on every chunk of the section."""
+    if not title or not text:
+        return text
+    if text.lower().startswith(title.lower()):
+        return text
+    sep = " " if title.endswith((":", "?", "!", ".")) else ": "
+    return f"{title}{sep}{text}"
+
+
+def plan_page_chunks(page_text: str, headings: list[str] | None,
+                     child_size: int = CHILD_SIZE,
+                     child_overlap: int = CHILD_OVERLAP,
+                     parent_size: int = PARENT_SIZE,
+                     ) -> tuple[list[tuple[str, str | None, int]],
+                                list[tuple[str, str | None, int]]]:
+    """Parents and children for one page, in page word order.
+
+    Each item is (text, section_title | None, start_word) where start_word is
+    the offset of the chunk's first word within the page — children are mapped
+    to the parent that contains them.
+
+    Window mode (no headings): identical to the old fixed word windows.
+    Heading mode: the page is split into sections first, then windows are cut
+    inside each section, so no chunk ever crosses a heading boundary.
+    """
+    sections = split_sections(page_text, headings)
+    parents: list[tuple[str, str | None, int]] = []
+    children: list[tuple[str, str | None, int]] = []
+    word_cursor = 0
+    for title, text in sections:
+        for j, ptxt in enumerate(chunk_words_page(text, parent_size)):
+            parents.append((_with_section(title, ptxt), title,
+                            word_cursor + j * parent_size))
+        for i, ctxt in enumerate(chunk_words(text, child_size, child_overlap)):
+            children.append((_with_section(title, ctxt), title,
+                             word_cursor + i * (child_size - child_overlap)))
+        word_cursor += len(text.split())
+    return parents, children
+
+
+def _parent_index_for(start_word: int, parent_starts: list[int]) -> int:
+    """Index of the parent window containing `start_word` (last one that has
+    started at or before it). For contiguous window mode this is exactly the
+    old `start_word // parent_size`."""
+    idx = 0
+    for i, s in enumerate(parent_starts):
+        if s <= start_word:
+            idx = i
+        else:
+            break
+    return idx
+
 
 
 def ingest_pdfs(
@@ -258,6 +535,7 @@ def ingest_pdfs(
     files: list[Path] | None = None,
     use_ocr: bool = True,
     engine_name: str | None = None,
+    chunking: str | None = None,
 ) -> tuple[int, int]:
     """Ingest the given documents (default: every PDF/image in docs_dir).
 
@@ -267,6 +545,12 @@ def ingest_pdfs(
     so deselected files stop contributing to answers.
     Returns (files_processed, child_chunks_stored).
 
+    chunking: 'window' (default) or 'heading'; None reads the CHUNKING env
+    var. Heading mode splits pages at detected headings (see plan_page_chunks)
+    and stamps `chunking`/`section` into every chunk's metadata; because the
+    mode is part of each chunk ID, re-ingesting under another mode replaces
+    the old mode's chunks instead of mixing them.
+
     Image files (.png/.jpg/.jpeg) are treated as 1-page documents and OCR'd.
     For PDFs, only pages with less than OCR_MIN_CHARS of extracted text are
     OCR'd (when use_ocr and Tesseract are available); chunk metadata records
@@ -275,6 +559,7 @@ def ingest_pdfs(
     progress_cb, if given, is called with a short status string per PDF
     (used by the Streamlit UI as a progress indicator).
     """
+    mode = _normalize_chunking(chunking)
     docs = sorted(
         p for p in (
             files if files is not None
@@ -359,6 +644,12 @@ def ingest_pdfs(
         if progress_cb:
             progress_cb(f"Reading {doc_path.name}...")
         file_chunks = 0
+        page_headings: dict[int, list[str]] = {}
+        if mode == CHUNKING_HEADING and doc_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            # Heading mode: detect per-page section headings from the PDF's
+            # font/structure info. Pages with no text layer (OCR'd) or with no
+            # usable headings are simply missing here -> window fallback.
+            page_headings = load_headings(doc_path)
         if doc_path.suffix.lower() in IMAGE_EXTENSIONS:
             # An image upload is a 1-page document; it only has pixels, so
             # without OCR there is nothing to index.
@@ -379,25 +670,28 @@ def ingest_pdfs(
             ocr_pages_total += len(page_texts)
             ocr_pages_count += len(_last_ocr_pages)
         for page_num, page_text in page_texts:
-            # Parents for this page: up to `parent_size` words each, no overlap
-            # across pages, so a parent never spans two pages.
-            page_parents = list(chunk_words_page(page_text, parent_size))
+            # Parents and children for this page. Window mode cuts fixed word
+            # windows over the page; heading mode cuts them per section (see
+            # plan_page_chunks), so a chunk never crosses a heading.
+            headings = page_headings.get(page_num, [])
+            page_parents, page_children = plan_page_chunks(
+                page_text, headings, child_size, child_overlap, parent_size)
             page_parent_ids = []
-            for j, ptxt in enumerate(page_parents):
-                pid = _chunk_id(doc_path.name, page_num, f"par{j}", ptxt)
+            parent_starts = []
+            for j, (ptxt, _section, start_word) in enumerate(page_parents):
+                pid = _chunk_id(doc_path.name, page_num, f"par{j}", ptxt, mode)
                 page_parent_ids.append(pid)
+                parent_starts.append(start_word)
                 if pid not in live_parent_ids:
                     parent_ids.append(pid)
                     parent_texts.append(ptxt)
                     live_parent_ids.add(pid)
 
-            for i, chunk in enumerate(chunk_words(page_text, child_size, child_overlap)):
-                cid = _chunk_id(doc_path.name, page_num, i, chunk)
-                # Which parent covers this child: children are built from the
-                # same page text, so find the parent window containing the
-                # child's first word.
-                start_word = i * (child_size - child_overlap)
-                pidx = min(start_word // parent_size, len(page_parent_ids) - 1)
+            for i, (chunk, section, start_word) in enumerate(page_children):
+                cid = _chunk_id(doc_path.name, page_num, i, chunk, mode)
+                # Which parent covers this child: children and parents are cut
+                # from the same page/section text in page word order.
+                pidx = _parent_index_for(start_word, parent_starts)
                 ids.append(cid)
                 texts.append(chunk)
                 metas.append({
@@ -406,6 +700,8 @@ def ingest_pdfs(
                     "parent_id": page_parent_ids[pidx],
                     "ocr": bool(page_ocr_flags.get(page_num, False)),
                     "ocr_engine": page_engines.get(page_num, ""),
+                    "chunking": mode,
+                    "section": section or "",
                 })
                 live_ids.add(cid)
                 file_chunks += 1
@@ -469,7 +765,62 @@ def ingest_pdfs(
     return len(docs), collection.count()
 
 
+def heading_report(docs_dir: Path = DOCS_DIR, limit: int = 30) -> str:
+    """Per-file heading-detection summary for sanity-checking real PDFs.
+
+    Lists the first `limit` headings per file and flags files with zero
+    detected headings (they fall back to window chunking) or with an
+    implausible density of more than one heading per MIN_WORDS_PER_HEADING
+    words. Read-only: only the PDF text layer is inspected (no OCR).
+    """
+    MIN_WORDS_PER_HEADING = 50
+    out = ["# Heading detection report", "",
+           f"Rule: bigger-than-body font, numbered/prefixed labels, short "
+           f"bold sub-headings and 'label:' lines · flag threshold: "
+           f"< {MIN_WORDS_PER_HEADING} words per heading", ""]
+    for pdf in sorted(docs_dir.glob("*.pdf")):
+        try:
+            doc = pymupdf.open(pdf)
+        except Exception as exc:
+            out += [f"## {pdf.name}", "", f"Could not open: {exc}", ""]
+            continue
+        found: list[tuple[int, str]] = []
+        words = 0
+        text_pages = 0
+        for pno, page in enumerate(doc, start=1):
+            raw = page.get_text() or ""
+            if raw.strip():
+                text_pages += 1
+                words += len(raw.split())
+            found.extend((pno, h) for h in detect_page_headings(page))
+        page_count = doc.page_count
+        doc.close()
+
+        n = len(found)
+        per = words / n if n else 0.0
+        out += [f"## {pdf.name}", "",
+                f"- {page_count} pages ({text_pages} with a text layer), "
+                f"{n} heading(s), {words} words"
+                + (f", 1 per {per:.0f} words" if n else "")]
+        if n == 0:
+            out.append("- **FLAG: NO HEADINGS DETECTED — this file falls back "
+                       "to window chunking**")
+        elif per < MIN_WORDS_PER_HEADING:
+            out.append(f"- **FLAG: implausibly many headings — 1 per "
+                       f"{per:.0f} words (< {MIN_WORDS_PER_HEADING})**")
+        out.append("")
+        for pno, h in found[:limit]:
+            out.append(f"- p{pno}: {h}")
+        if n > limit:
+            out.append(f"- … {n - limit} more")
+        out.append("")
+    return "\n".join(out)
+
+
 def main() -> None:
+    if "--headings" in sys.argv:
+        print(heading_report())
+        return
     try:
         health_check()
     except IndexCorruptError as exc:

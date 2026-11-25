@@ -6,7 +6,9 @@
 |---|---|---|
 | PDF upload & library | `app.py` sidebar | Upload multiple PDFs → saved to `docs/`; per-file delete (🗑) also removes its chunks from the index |
 | Per-file selection | `app.py` sidebar | Checkboxes decide which files answers can draw on; BM25 respects the filter |
+| Per-file page ranges | `retrieve.py` + `app.py` + `agent.py` + `query_log.py` | Optional inclusive page range per selected file (sidebar "Pages" control, validated against the real page count, blank = all pages); applied in dense (Chroma `$and` per constrained file, merged by score), BM25 (candidates filtered BEFORE scoring), rerank and parent lookup (they only see in-range hits), and every `retrieve_multi` sub-query; all three retrieval modes respect it; CLI: `retrieve.py "q" --pages "Unit3.pdf:10-35"` (repeatable); active filter shown in the Sources panel header and the "How I searched" trace; logged in `queries.page_filter` JSON (auto-migrated old DBs keep their rows) |
 | PDF ingestion & chunking | `ingest.py` | PyMuPDF extraction + `clean_text()` (camelCase/letter-digit splits, de-hyphenation) → child/parent word windows; fused-token diagnostic on ingest |
+| Heading-aware chunking (opt-in) | `ingest.py` | `CHUNKING=heading` (default `window`) splits each page at detected section headings (bigger-than-body font, numbered/prefixed labels, short bold sub-headings, `label:` lines; per-page body-size calibration), so no chunk crosses a section boundary; `section` + `chunking` metadata on every chunk, section title repeated on each of its chunks; OCR/headingless pages fall back to window automatically; mode tag (`win`/`head`) is part of every chunk ID so switching modes replaces rather than mixes; `python ingest.py --headings` prints the first 30 headings per file and flags zero/implausible density; measured better than window on 45 questions (hybrid_rerank 0.911 vs 0.878/0.888, `eval_results_heading.md` vs `eval_results_baseline.md`) |
 | OCR for scanned pages & images | `ocr.py` + `ingest.py` | Pages with < `OCR_MIN_CHARS` (default 30) extracted chars are OCR'd; `.png`/`.jpg`/`.jpeg` uploads become 1-page OCR'd documents; `ocr: true/false` + `ocr_engine` chunk metadata + `OCR · <engine>` badge in Sources; swappable `OcrEngine` interface |
 | OCR engines (incl. handwriting) | `ocr.py` | `tesseract` (local, free, print-quality) · `claude` (Anthropic vision API, best on cursive; `OCR_CLAUDE_MODEL`) · `ollama` (local vision model, `OCR_OLLAMA_MODEL`, respects `OLLAMA_HOST`) · `auto` (tesseract first; mean word confidence < `OCR_CONF_THRESHOLD` [60] or garbage text escalates to `OCR_VISION_ENGINE`); shared transcription prompt; retries w/ backoff; vision failure falls back to Tesseract |
 | OCR engine cache | `ocr_cache/` | Cached per (file hash, page, engine, model) — switching engines never returns stale text; old tesseract-only entries stay valid |
@@ -64,8 +66,8 @@
 - [x] **Query decomposition for multi-topic questions** — `decompose.py` splits a question into per-topic sub-queries; per-sub-query gating + guaranteed-slot merge in `retrieve_multi`; parts-aware prompts in `generate.py`; measured by `evaluate.py --multitopic`
 - [x] **Bounded agentic flow** — retry retrieval on weak results, clarifying question when stuck — `agent.py` (`AGENT_MAX_RETRIES`, clarify-by-rule, trace); measured by `evaluate.py --agent`
 - [ ] Better OCR models — plug a stronger vision LLM behind `ocr.py`'s `OcrEngine` interface
-- [ ] Better chunking — respect headings/paragraph boundaries instead of fixed word windows
-- [ ] Metadata filters (by file, page range) in the UI
+- [x] **Better chunking** — heading-aware section splitting instead of fixed word windows — `ingest.py` (`CHUNKING=heading`, default stays `window`; measured 0.911 vs 0.878/0.888 hybrid_rerank)
+- [x] Metadata filters (by file, page range) in the UI — per-file inclusive page ranges (`app.py` "Pages" controls + `retrieve.py` `--pages`), applied across dense/BM25/rerank/retrieve_multi, logged in `query_log`
 
 ### UX
 - [ ] Show token/word count of the indexed docs

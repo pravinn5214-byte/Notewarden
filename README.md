@@ -25,6 +25,21 @@ question -------------------> retrieve.py (mode: dense | hybrid | hybrid_rerank)
   The matching child's *parent* chunk (default 500 words, page-aware) is what
   the LLM reads, so answers cite the right page but reason over coherent
   context. Sizes are configurable in the sidebar.
+- **Chunking modes** (`CHUNKING` env var, default `window`):
+  - `window` — fixed word windows over each page (original behaviour).
+  - `heading` — split each page at its detected section headings (bigger font,
+    numbered/prefixed labels, short bold sub-headings, `label:` lines), so a
+    chunk never crosses a section boundary; every chunk gets `section`
+    metadata and the title is repeated on each of its chunks for BM25/embed.
+    Pages with no text layer (OCR) or no usable headings automatically fall
+    back to window chunking. Inspect detection on your PDFs with
+    `python ingest.py --headings` (prints the first 30 headings per file and
+    flags files with zero or implausibly many headings).
+    Measured on `docs/` (45 questions, hybrid_rerank): heading 0.911 vs
+    window 0.878 (k=3) / 0.888 (k=5) — see `eval_results_heading.md` vs
+    `eval_results_baseline.md`. Switch with `CHUNKING=heading` in `.env`
+    (or per run), then re-ingest; the mode is part of each chunk ID, so
+    re-ingesting replaces the old mode's chunks instead of mixing them.
 - **Text extraction**: PyMuPDF (chosen over pypdf after measurement: pypdf
   dropped inter-word spaces on 170.pdf, producing 2.16% fused tokens like
   `CommonlyinvolvedinDNA`; PyMuPDF yields 0.01%). `clean_text()` additionally
