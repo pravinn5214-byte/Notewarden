@@ -287,9 +287,18 @@ python evaluate.py --ablation   # + parent-vs-child LLM-judge ablation
 
 It builds an index in `eval_chroma_db_<size>/` (your app index is untouched)
 for each child chunk size, runs every question from `eval_questions.json` in
-every mode, and saves tables to `eval_results.md`. Latest headline (45
-questions, child size 120): hybrid_rerank MRR 0.856 vs dense 0.667 at k=3 —
-significant by paired bootstrap (diff +0.189, CI excludes 0).
+every mode, and saves tables to `eval_results.md`. Set `EVAL_DB_DIR` to use a
+different base directory — that's how two chunking modes are compared without
+re-ingesting over each other:
+
+```
+CHUNKING=heading EVAL_DB_DIR=eval_chroma_db_heading python evaluate.py --write
+```
+
+Latest headline (45 questions, child size 120, hybrid_rerank k=3): heading
+chunking 0.911 vs window 0.878 (`eval_results_heading.md` /
+`eval_results_baseline.md`); window's dense 0.667 vs hybrid_rerank 0.878 at
+k=3.
 
 Add your own questions to `eval_questions.json`:
 

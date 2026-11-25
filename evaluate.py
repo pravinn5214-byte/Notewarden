@@ -25,18 +25,22 @@ Usage:
 Results are saved to eval_results.md.
 """
 import json
+import os
 import random
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from ingest import CHILD_SIZE, ingest_pdfs
+from ingest import CHILD_SIZE, chunking_mode, ingest_pdfs
 from retrieve import MODES, retrieve, retrieve_multi
 from generate import FALLBACK_MESSAGE
 
 EVAL_FILE = Path("eval_questions.json")
 RESULTS_FILE = Path("eval_results.md")
-DB_DIR = "eval_chroma_db"  # separate store so the app's index is untouched
+# Separate store so the app's index is untouched. EVAL_DB_DIR switches the
+# store (e.g. EVAL_DB_DIR=eval_chroma_db_heading) so two chunking modes can be
+# measured without either one evicting the other's index.
+DB_DIR = os.environ.get("EVAL_DB_DIR", "eval_chroma_db")
 KS = [3, 5]
 OVERLAP = 20  # child overlap
 BOOTSTRAP_N = 1000
@@ -281,6 +285,7 @@ def main() -> None:
         "",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')} · "
         f"{len(questions)} questions · extractor: PyMuPDF + clean_text · "
+        f"chunking: {chunking_mode()} · "
         f"child overlap {OVERLAP} · RRF k=60 · reranker: ms-marco-MiniLM-L-6-v2 · "
         f"{BOOTSTRAP_N} bootstrap resamples (seed {BOOTSTRAP_SEED})",
         "",
