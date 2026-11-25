@@ -94,10 +94,23 @@ def _parse_llm_json(raw: str) -> dict | None:
 
 
 def _valid_subqueries(items: list) -> list[str] | None:
-    """Cleaned list or None if invalid (non-strings, <3 chars, duplicates)."""
-    if not items or not all(isinstance(s, str) for s in items):
+    """Cleaned list of strings, or None if invalid (<3 chars, duplicates).
+
+    Accepts plain strings and {"query": "..."} objects (small local models
+    like llama3.2 return the object shape even when asked for strings —
+    format=json fixes syntax but not schema).
+    """
+    if not items:
         return None
-    cleaned = [s.strip() for s in items]
+    normalized: list[str | None] = []
+    for s in items:
+        if isinstance(s, str):
+            normalized.append(s)
+        elif isinstance(s, dict) and isinstance(s.get("query"), str):
+            normalized.append(s["query"])
+        else:
+            return None
+    cleaned = [s.strip() for s in normalized]
     if any(len(s) < 3 for s in cleaned):
         return None
     seen: set[str] = set()
@@ -167,7 +180,8 @@ def decompose(question: str, llm=None) -> Decomposition:
     try:
         if llm is None:
             from generate import complete
-            raw = complete(SPLIT_PROMPT + f"\n\nQuestion: {question}", max_tokens=200)
+            raw = complete(SPLIT_PROMPT + f"\n\nQuestion: {question}",
+                           max_tokens=200, json_mode=True)
         else:
             raw = llm(SPLIT_PROMPT + f"\n\nQuestion: {question}", max_tokens=200)
     except Exception:

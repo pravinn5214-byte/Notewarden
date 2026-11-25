@@ -76,3 +76,33 @@ def test_unsupported_subquery_listed():
 def test_generate_answer_all_unsupported_fallback_behaviour():
     """No chunks at all -> the existing fallback message (unchanged path)."""
     assert generate.generate_answer("any question", []) == generate.FALLBACK_MESSAGE
+
+
+def test_gate_uses_best_dense_score_not_first_hit(monkeypatch):
+    """Regression (verification 1c): hits are ordered by the mode's ranking
+    score (RRF / cross-encoder), so chunks[0] can be a weak dense match while
+    a later chunk clears MIN_SCORE. The gate must pass on the BEST dense
+    score — the same number query_log records as top_dense_score and the same
+    rule query_log.gated() uses — otherwise the log says one thing (not gated)
+    while the answer says another (fallback)."""
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-key-for-tests")
+    monkeypatch.setattr("generate._call_claude", lambda prompt, api_key: "the answer")
+
+    from generate import MIN_SCORE
+    reordered = [
+        # top-ranked by the mode, but its dense cosine is below the gate
+        {"id": "a", "text": "weak match", "source": "a.pdf", "page": 1,
+         "dense_score": MIN_SCORE - 0.2, "score": 5.0},
+        # lower-ranked, but the best dense match in the set
+        {"id": "b", "text": "strong match", "source": "a.pdf", "page": 2,
+         "dense_score": MIN_SCORE + 0.2, "score": 1.0},
+    ]
+    assert generate.generate_answer("what is it?", reordered) == "the answer"
+    # every chunk below the gate -> still gated out (unchanged behaviour)
+    weak = [{**h, "dense_score": MIN_SCORE - 0.2} for h in reordered]
+    assert generate.generate_answer("what is it?", weak) == generate.FALLBACK_MESSAGE
+    # the gate decision and the logged invariant agree in both directions
+    from query_log import gated, top_dense
+    assert gated(reordered, MIN_SCORE) is False and top_dense(reordered) > MIN_SCORE
+    assert gated(weak, MIN_SCORE) is True and top_dense(weak) < MIN_SCORE

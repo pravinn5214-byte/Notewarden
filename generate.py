@@ -65,9 +65,12 @@ Question: {question}
 Answer:"""
 
 
-def complete(prompt: str, max_tokens: int = 200) -> str:
+def complete(prompt: str, max_tokens: int = 200, json_mode: bool = False) -> str:
     """One raw LLM completion using the configured provider (claude/ollama).
 
+    json_mode: request structured JSON output. Anthropic always honours the
+    prompt-level "Return JSON only"; Ollama needs its `format: "json"` flag,
+    which forces syntactically valid JSON (content still needs validation).
     Shared by answer generation and utility calls (e.g. query decomposition).
     Raises RuntimeError on provider problems; callers handle fallbacks.
     """
@@ -108,6 +111,7 @@ def complete(prompt: str, max_tokens: int = 200) -> str:
                     "model": model,
                     "prompt": prompt,
                     "stream": False,
+                    **({"format": "json"} if json_mode else {}),
                     "options": {"temperature": 0, "num_predict": max_tokens},
                 },
                 timeout=120,
@@ -261,14 +265,22 @@ def generate_answer(question: str, chunks: list[dict], min_score: float = MIN_SC
     from retrieve()) rather than "score": MIN_SCORE is calibrated for cosine
     similarity (0..1), while hybrid's RRF scores (~0.03 max) and the
     cross-encoder's scores (often negative) live on different scales and
-    would trip a cosine threshold incorrectly.
+    would trip a cosine threshold incorrectly. It looks at the BEST dense
+    score among the chunks (see the gate below), which is exactly what
+    query_log.gated() records as `gated_out`.
 
     Raises RuntimeError with a user-actionable message on provider problems
     (missing key, API error, Ollama down).
     """
     if not chunks:
         return FALLBACK_MESSAGE
-    dense_score = chunks[0].get("dense_score", chunks[0]["score"])
+    # Gate on the BEST dense cosine across the returned chunks, not on
+    # chunks[0]: hits are ordered by the mode's ranking score (RRF or the
+    # cross-encoder), so the top-ranked hit is often not the best dense match.
+    # This is the same rule retrieve_multi applies per sub-query and the same
+    # number the query log records as top_dense_score, so `gated_out` in the
+    # log always matches what actually happened here.
+    dense_score = max(c.get("dense_score", c.get("score", 0.0)) for c in chunks)
     if dense_score < min_score:
         return FALLBACK_MESSAGE  # best match is too weak - don't ask the LLM
 

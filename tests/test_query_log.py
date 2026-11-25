@@ -377,3 +377,69 @@ def store_agent_db(tmp_path_factory):
     import store as store_mod
     store_mod.reset_client()  # drop handles from any earlier test's client
     return str(db)
+
+
+# --- A2: decomposition format=json + object schema ------------------------------
+
+def test_valid_subqueries_accepts_query_objects():
+    """llama3.2 (format=json) returns [{"query": "..."}] objects; the
+    validator must accept both shapes."""
+    from decompose import _valid_subqueries
+    assert _valid_subqueries(["plain string", "another one"]) == \
+        ["plain string", "another one"]
+    assert _valid_subqueries([{"query": "topic one"}, {"query": "topic two"}]) == \
+        ["topic one", "topic two"]
+    assert _valid_subqueries([{"query": "x"}, "plain"]) is None  # mixed shapes rejected
+    assert _valid_subqueries([{"nope": "x"}]) is None
+    assert _valid_subqueries([{"query": 5}]) is None
+    assert _valid_subqueries([{"query": "a"}, {"query": "a"}]) is None  # duplicates
+    assert _valid_subqueries([]) is None
+
+
+def test_multitopic_log_row_has_sub_queries(store_agent_db, tmp_path, monkeypatch):
+    """A decomposed turn logs the sub_queries JSON (fake provider, no network)."""
+    db = store_agent_db
+    monkeypatch.setenv("QUERY_LOG_PATH", str(tmp_path / "queries.db"))
+    monkeypatch.setenv("AGENT_SUFFICIENCY_CHECK", "off")
+    monkeypatch.setenv("DECOMPOSE", "on")
+    # Fake the LLM: any decompose/utility call gets a valid two-topic JSON
+    # reply in llama3.2's object schema; generate_answer uses the faked claude.
+    import generate
+    monkeypatch.setattr(generate, "complete",
+                        lambda prompt, max_tokens=200, json_mode=False:
+                        '{"subqueries": [{"query": "how do ribosomes translate mrna"},'
+                        ' {"query": "crm lead pipeline stages"}], "answer_as_parts": true}')
+    from agent import answer_with_agent
+    result = answer_with_agent(
+        "explain how ribosomes translate mrna and also describe the crm lead pipeline stages",
+        history=[], mode="hybrid", top_k=3, db_dir=str(db))
+    import decompose as dec_mod
+    dec_mod.clear_cache()
+    conn = sqlite3.connect(tmp_path / "queries.db")
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM queries ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    subs = json.loads(row["sub_queries"]) if row["sub_queries"] else []
+    assert len(subs) == 2, f"sub_queries not logged: {row['sub_queries']}"
+    assert row["decompose_used"] == 1
+    assert result.action == "answer"
+
+
+def test_complete_json_mode_flag_forwarded(monkeypatch):
+    """complete(json_mode=True) adds format:json for ollama only."""
+    import generate
+    captured = {}
+    class FakeResp:
+        status_code = 200
+        def json(self):
+            return {"response": "{}"}
+    def fake_post(url, json=None, **kw):
+        captured["url"] = url
+        captured["body"] = json
+        return FakeResp()
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(generate.requests, "post", fake_post)
+    generate.complete("p", json_mode=True)
+    assert captured["body"]["format"] == "json"
+    generate.complete("p", json_mode=False)
+    assert "format" not in captured["body"]
