@@ -149,6 +149,7 @@ def retrieve_with_fallback(
     db_dir: str,
     llm=None,
     trace: dict | None = None,
+    page_ranges: dict[str, tuple[int, int]] | None = None,
 ) -> tuple[list[dict], set[int], dict, dict]:
     """Retrieve; if every result/sub-query fails the gate, rewrite ONCE and
     retry. Returns (hits, supported, decomposition, trace)."""
@@ -162,9 +163,11 @@ def retrieve_with_fallback(
     queries_tried = [subs if len(subs) > 1 else query]
     if len(subs) > 1:
         hits, supported = retrieve_multi(subs, mode=mode, top_k=top_k,
-                                         files=files, db_dir=db_dir)
+                                         files=files, db_dir=db_dir,
+                                         page_ranges=page_ranges)
     else:
-        hits = retrieve(query, k=top_k, mode=mode, allowed_sources=files, db_dir=db_dir)
+        hits = retrieve(query, k=top_k, mode=mode, allowed_sources=files, db_dir=db_dir,
+                        page_ranges=page_ranges)
         supported = {0} if hits else set()
 
     def _all_failed(hits: list[dict], supported: set[int], n_subs: int) -> bool:
@@ -199,9 +202,11 @@ def retrieve_with_fallback(
         sub2 = decompose(new_query).subqueries
         if len(sub2) > 1:
             hits2, supported2 = retrieve_multi(sub2, mode=mode, top_k=top_k,
-                                               files=files, db_dir=db_dir)
+                                               files=files, db_dir=db_dir,
+                                               page_ranges=page_ranges)
         else:
-            hits2 = retrieve(new_query, k=top_k, mode=mode, allowed_sources=files, db_dir=db_dir)
+            hits2 = retrieve(new_query, k=top_k, mode=mode, allowed_sources=files, db_dir=db_dir,
+                             page_ranges=page_ranges)
             supported2 = {0} if hits2 else set()
         if not _all_failed(hits2, supported2, len(sub2)):
             trace["retrieval"] = {"queries_tried": queries_tried, "retry": True,
@@ -280,11 +285,14 @@ def answer_with_agent(
     files: list[str] | None = None,
     db_dir: str | None = None,
     llm=None,
+    page_ranges: dict[str, tuple[int, int]] | None = None,
 ) -> AgentResult:
     """One bounded agent turn: rewrite -> retrieve -> (retry) -> (clarify) -> answer.
 
     history: recent turns oldest-first ([{"role", "text"}]); the last
     AGENT_HISTORY_TURNS are used. llm: fake (prompt, max_tokens) -> str for tests.
+    page_ranges: per-file inclusive page filters, passed through to retrieval
+    and into the trace/query log.
     """
     from generate import MIN_SCORE
     import store as store_mod
@@ -324,6 +332,8 @@ def answer_with_agent(
                 llm_provider=_os.environ.get("LLM_PROVIDER", "claude"),
                 latency_ms=(_time.monotonic() - _turn_start) * 1000.0,
                 answer=text if action == "answer" else None,
+                page_filter=[{"file": f, "start": s, "end": e}
+                             for f, (s, e) in sorted(page_ranges.items())] if page_ranges else None,
             )
         except Exception as exc:
             logger.warning("Query logging failed (ignored): %s", exc)
@@ -352,7 +362,10 @@ def answer_with_agent(
 
     # (b/c) Retrieve, with at most one bounded retry.
     hits, supported, decomposition, rtrace = retrieve_with_fallback(
-        query, mode, top_k, files, db_dir, llm=llm, trace=trace)
+        query, mode, top_k, files, db_dir, llm=llm, trace=trace,
+        page_ranges=page_ranges)
+    if page_ranges:
+        trace["page_filter"] = {f: f"{s}-{e}" for f, (s, e) in sorted(page_ranges.items())}
     step("retrieve", queries=len(rtrace.get("queries_tried", [])),
          retry=rtrace.get("retry", False), hits=len(hits))
     trace["queries_tried"] = rtrace.get("queries_tried", [])

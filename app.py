@@ -73,6 +73,52 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = uuid.uuid4().hex[:12]  # browser-session tag for query_log
 
 # --- Sidebar -------------------------------------------------------------------
+def _doc_page_count(doc_path: Path) -> int | None:
+    """Page count for validation (None if unreadable — no validation then)."""
+    try:
+        import pymupdf
+        with pymupdf.open(doc_path) as doc:
+            return doc.page_count
+    except Exception:
+        return None
+
+
+def _render_pages_control(doc_path: Path, page_ranges: dict[str, tuple[int, int]]) -> str | None:
+    """Collapsible 'Pages' control for one selected file: two number inputs
+    (blank = all pages). Validated against the file's page count and
+    start <= end; returns an error message or None. Valid ranges are written
+    into page_ranges."""
+    key = f"pages_{doc_path.name}"
+    with st.expander("Pages", expanded=False):
+        n = _doc_page_count(doc_path)
+        col_a, col_b = st.columns(2)
+        start_raw = col_a.text_input("from", value="", key=f"{key}_start",
+                                     placeholder="1", label_visibility="collapsed")
+        end_raw = col_b.text_input("to", value="", key=f"{key}_end",
+                                   placeholder=str(n or "?"), label_visibility="collapsed")
+        start_raw, end_raw = start_raw.strip(), end_raw.strip()
+        if not start_raw and not end_raw:
+            page_ranges.pop(doc_path.name, None)
+            return None
+        try:
+            start = int(start_raw) if start_raw else 1
+            end = int(end_raw) if end_raw else (n or 0)
+        except ValueError:
+            page_ranges.pop(doc_path.name, None)
+            return "Page numbers must be integers."
+        if start < 1:
+            page_ranges.pop(doc_path.name, None)
+            return "Pages start at 1."
+        if n is not None and (start > n or end > n):
+            page_ranges.pop(doc_path.name, None)
+            return f"{doc_path.name} has {n} page(s)."
+        if start > end:
+            page_ranges.pop(doc_path.name, None)
+            return f"Start ({start}) must be <= end ({end})."
+        page_ranges[doc_path.name] = (start, end)
+        return None
+
+
 
 with st.sidebar:
     st.title("📚 Study Assistant")
@@ -99,6 +145,7 @@ with st.sidebar:
         st.caption("No documents yet.")
 
     selected: list[Path] = []
+    page_ranges: dict[str, tuple[int, int]] = {}
     for doc_path in docs:
         col_check, col_name, col_del = st.columns([0.1, 0.75, 0.15])
         checked = col_check.checkbox(f"Use {doc_path.name}", value=True, key=f"sel_{doc_path.name}", label_visibility="collapsed")
@@ -119,6 +166,7 @@ with st.sidebar:
             st.rerun()
         if checked:
             selected.append(doc_path)
+            _page_range_error = _render_pages_control(doc_path, page_ranges)
 
     st.divider()
 
@@ -284,9 +332,13 @@ with st.sidebar:
             st.caption(f"Query log unavailable: {exc}")
 
 def _render_sources(sources: list[dict], subqueries: list[str] | None = None,
-                    supported: set | None = None) -> None:
+                    supported: set | None = None, page_ranges: dict | None = None) -> None:
     """Sources expander body: grouped by sub-question when decomposed."""
-    with st.expander("Sources"):
+    header = "Sources"
+    if page_ranges:
+        flt = ", ".join(f"{f} p.{s}–{e}" for f, (s, e) in sorted(page_ranges.items()))
+        header += f" · pages: {flt}"
+    with st.expander(header):
         if subqueries and len(subqueries) > 1:
             supported = supported if supported is not None else set(range(len(subqueries)))
             by_sub: dict[int, list] = {}
@@ -322,6 +374,9 @@ def _render_trace(trace: dict) -> None:
             st.markdown(" · ".join(bits))
         if trace.get("queries_tried"):
             st.caption("Queries tried: " + " → ".join(trace["queries_tried"]))
+        if trace.get("page_filter"):
+            st.caption("Page filter: " + ", ".join(
+                f"{f} p.{rng}" for f, rng in sorted(trace["page_filter"].items())))
         if trace.get("clarify"):
             st.caption(f"Clarified because: {trace['clarify'].get('reason', 'unknown')}")
 
@@ -351,11 +406,13 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
         allowed_names = [p.name for p in selected]
         history_msgs = [m for m in st.session_state.messages
                         if m["role"] in ("user", "assistant")][-8:]
+        if _page_range_error:
+            st.warning(f"Page filter ignored: {_page_range_error}")
         if agent_mode:
             try:
                 result = answer_with_agent(
                     question, history=history_msgs, mode=mode, top_k=top_k,
-                    files=allowed_names,
+                    files=allowed_names, page_ranges=page_ranges or None,
                 )
             except IndexCorruptError:
                 st.error("The index looks out of sync. Click **Repair index** in the sidebar.")
@@ -367,7 +424,8 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
             if result.sources:
                 _render_sources(result.sources,
                                 result.trace.get("decomposition_subqueries"),
-                                result.trace.get("supported"))
+                                result.trace.get("supported"),
+                                page_ranges or None)
             _render_trace(result.trace)
             if result.action == "answer":
                 st.session_state.messages.append(
@@ -384,12 +442,12 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
             if decomposition is not None and len(decomposition.subqueries) > 1:
                 hits, supported = retrieve_multi(
                     decomposition.subqueries, mode=mode, top_k=top_k,
-                    files=allowed_names,
+                    files=allowed_names, page_ranges=page_ranges or None,
                 )
             else:
                 hits = retrieve(
                     question, k=top_k, mode=mode,
-                    allowed_sources=allowed_names,
+                    allowed_sources=allowed_names, page_ranges=page_ranges or None,
                 )
                 supported = {0} if hits else set()
         except IndexCorruptError:
@@ -406,7 +464,8 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
                 st.error(f"LLM error: {exc}")
                 st.stop()
         st.markdown(answer)
-        _render_sources(hits, decomposition.subqueries if decomposition else None, supported)
+        _render_sources(hits, decomposition.subqueries if decomposition else None, supported,
+                        page_ranges or None)
 
         # Query log (best-effort, never breaks the app).
         import time as _time
@@ -430,6 +489,8 @@ if question := st.chat_input("Ask about your notes...", disabled=bool(blockers))
                 llm_provider=os.environ.get("LLM_PROVIDER", "claude"),
                 latency_ms=(_time.monotonic() - _plain_turn_start) * 1000.0,
                 answer=answer,
+                page_filter=[{"file": f, "start": s, "end": e}
+                             for f, (s, e) in sorted(page_ranges.items())] if page_ranges else None,
             )
         except Exception:  # logging must never break the app
             pass

@@ -43,6 +43,84 @@ RRF_K = 60            # standard RRF constant
 MODES = ("dense", "hybrid", "hybrid_rerank")
 DEFAULT_MODE = "hybrid_rerank"
 
+# --- Page-range metadata filters ---------------------------------------------
+# Shape everywhere: page_ranges = {"file.pdf": (start, end) | None}.
+# (start, end) is inclusive; None (or a missing entry) = all pages of that
+# file. Parsing accepts CLI/UI strings like "Unit3.pdf:10-35".
+
+_PAGE_SPEC_RE = re.compile(r"^(?P<name>.+):(?P<start>\d+)\s*-\s*(?P<end>\d+)$")
+
+
+def parse_page_specs(specs: list[str] | None) -> dict[str, tuple[int, int]]:
+    """Parse ['Unit3.pdf:10-35', 'Unit1.pdf:1-5'] -> {"Unit3.pdf": (10, 35), ...}.
+
+    Raises ValueError on a malformed spec or an inverted range (start > end).
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for spec in specs or []:
+        m = _PAGE_SPEC_RE.match(spec.strip())
+        if not m:
+            raise ValueError(
+                f"Invalid page range '{spec}'. Use 'file.pdf:START-END' (inclusive), "
+                "e.g. 'Unit3.pdf:10-35'.")
+        start, end = int(m.group("start")), int(m.group("end"))
+        name = m.group("name").strip()
+        if start > end:
+            raise ValueError(f"Invalid page range '{spec}': start ({start}) > end ({end}).")
+        if start < 1:
+            raise ValueError(f"Invalid page range '{spec}': pages start at 1.")
+        out[name] = (start, end)
+    return out
+
+
+def _normalize_page_ranges(
+    page_ranges: dict[str, tuple[int, int]] | list[tuple[str, int, int]] | None,
+) -> dict[str, tuple[int, int]]:
+    """Accept the dict shape or [(file, start, end), ...]; drop empty entries."""
+    if not page_ranges:
+        return {}
+    if isinstance(page_ranges, dict):
+        return {f: (int(rng[0]), int(rng[1])) for f, rng in page_ranges.items()
+                if rng is not None and rng[0] is not None and rng[1] is not None}
+    return {f: (int(s), int(e)) for f, s, e in page_ranges if s is not None and e is not None}
+
+
+def _page_where_parts(allowed: set[str] | None,
+                      page_ranges: dict[str, tuple[int, int]],
+                      db_dir: str = DB_DIR) -> list[tuple[str, dict | None]]:
+    """One (source, where) pair per constrained file; all remaining files
+    (unconstrained: not named in page_ranges) share one grouped $in query.
+    A file named in page_ranges but not in `allowed` is skipped entirely."""
+    parts: list[tuple[str, dict | None]] = []
+    if page_ranges:
+        for f, (s, e) in sorted(page_ranges.items()):
+            if allowed is not None and f not in allowed:
+                continue
+            parts.append((f, {"$and": [{"source": f}, {"page": {"$gte": s}}, {"page": {"$lte": e}}]}))
+        if allowed is None:
+            # No explicit selection: every file the index holds that is NOT
+            # constrained by a range.
+            collection, _ = _get_resources(db_dir)
+            data = with_index_recovery(lambda: collection.get(include=["metadatas"]))
+            rest = sorted({m["source"] for m in data["metadatas"]} - set(page_ranges))
+        else:
+            rest = sorted(f for f in allowed if f not in page_ranges)
+        if rest:
+            parts.append((None, {"source": {"$in": rest}}))
+        return parts
+    return [(None, {"source": {"$in": sorted(allowed)}} if allowed else None)]
+
+
+def _page_ok(meta: dict, page_ranges: dict[str, tuple[int, int]]) -> bool:
+    """In-memory check used for BM25 candidates and any post-filter."""
+    if not page_ranges:
+        return True
+    src = meta.get("source")
+    if src in page_ranges:
+        s, e = page_ranges[src]
+        return s <= meta.get("page", -1) <= e
+    return True  # unconstrained file
+
 _model: SentenceTransformer | None = None
 _reranker: CrossEncoder | None = None
 _collection: chromadb.Collection | None = None
@@ -172,23 +250,36 @@ def invalidate_bm25_cache() -> None:
         _bm25_cache.clear()
 
 
-def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) -> list[dict]:
-    """Dense retrieval: cosine similarity over child chunks."""
+def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None,
+                  page_ranges: dict[str, tuple[int, int]] | None = None) -> list[dict]:
+    """Dense retrieval: cosine similarity over child chunks.
+
+    page_ranges: per-file inclusive ranges; implemented as one Chroma query
+    per constrained file ($and on source+page) plus one grouped query for the
+    remaining files, merged by distance.
+    """
     collection, _ = _get_resources(db_dir)
-    where = {"source": {"$in": sorted(allowed)}} if allowed else None
+    ranges = _normalize_page_ranges(page_ranges)
     n = min(k * 5, with_index_recovery(collection.count))
     query_vec = _get_embedder().encode([question]).tolist()
 
-    def _query() -> dict:
-        col, _ = _get_resources(db_dir)  # re-resolve after a client reset
-        return col.query(query_embeddings=query_vec, n_results=max(1, n), where=where)
+    def _run(col: chromadb.Collection, where) -> dict:
+        return with_index_recovery(
+            lambda: col.query(query_embeddings=query_vec, n_results=max(1, n), where=where),
+            refetch=lambda: col.query(query_embeddings=query_vec, n_results=max(1, n), where=where))
 
-    res = with_index_recovery(lambda: collection.query(
-        query_embeddings=query_vec, n_results=max(1, n), where=where), refetch=_query)
+    parts = _page_where_parts(allowed, ranges, db_dir)
+    merged: list[tuple[float, str, str, dict]] = []
+    for _src, where in parts:
+        res = _run(collection, where)
+        for cid, doc, meta, dist in zip(
+            res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]
+        ):
+            merged.append((dist, cid, doc, meta))
+    merged.sort(key=lambda t: t[0])  # best cosine distance first
+
     out = []
-    for cid, doc, meta, dist in zip(
-        res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]
-    ):
+    for dist, cid, doc, meta in merged[:k]:
         out.append({
             "id": cid,
             "text": doc,
@@ -197,16 +288,33 @@ def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) 
             "parent_id": meta.get("parent_id", cid),
             "ocr": bool(meta.get("ocr", False)),
             "ocr_engine": meta.get("ocr_engine", ""),
+            "section": meta.get("section", ""),
             "dense_score": 1 - dist,
         })
     return out
 
 
-def _bm25_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) -> list[dict]:
-    """BM25 keyword retrieval over child chunks."""
+def _bm25_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None,
+                 page_ranges: dict[str, tuple[int, int]] | None = None) -> list[dict]:
+    """BM25 keyword retrieval over child chunks.
+
+    The page filter is applied BEFORE scoring: out-of-range chunks are removed
+    from the candidate set, so they can never occupy top ranks.
+    """
+    ranges = _normalize_page_ranges(page_ranges)
     ids, texts, metas, parent_texts, bm25 = _get_bm25(db_dir, allowed)
     if bm25 is None:
         return []
+    if ranges:
+        keep = [i for i, m in enumerate(metas) if _page_ok(m, ranges)]
+        ids = [ids[i] for i in keep]
+        texts = [texts[i] for i in keep]
+        metas = [metas[i] for i in keep]
+        parent_texts = [parent_texts[i] for i in keep]
+        if not texts:
+            return []
+        # Re-score over the reduced candidate set only (pre-score filter).
+        bm25 = BM25Okapi([tokenize(t) for t in texts])
     scores = bm25.get_scores(tokenize(question))
     order = sorted(range(len(ids)), key=lambda i: scores[i], reverse=True)[:k]
     return [
@@ -219,6 +327,7 @@ def _bm25_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None) -
             "parent_text": parent_texts[i],
             "ocr": bool(metas[i].get("ocr", False)),
             "ocr_engine": metas[i].get("ocr_engine", ""),
+            "section": metas[i].get("section", ""),
             "bm25_rank": rank,
         }
         for rank, i in enumerate(order, start=1)
@@ -281,12 +390,17 @@ def retrieve(
     mode: str = DEFAULT_MODE,
     allowed_sources: list[str] | None = None,
     return_parents: bool = True,
+    page_ranges: dict[str, tuple[int, int]] | list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     """Return the top-k chunks as dicts: text, source, page, score (+ extras).
 
     mode: "dense", "hybrid" or "hybrid_rerank" (see module docstring).
     allowed_sources: file names to restrict retrieval to (per-file selection);
         None means everything.
+    page_ranges: per-file inclusive page ranges, {"file.pdf": (start, end)} or
+        [(file, start, end)]; None/{} means all pages. Applied in dense (Chroma
+        $and), BM25 (candidates filtered before scoring), and therefore to
+        rerank/parents, which only see in-range hits.
     return_parents: if True (default), hybrid/hybrid_rerank return the parent
         chunk's text as "text" (that's what the LLM should read); dense always
         returns the child text itself. Either way "page"/"source" come from
@@ -295,16 +409,17 @@ def retrieve(
     if mode not in MODES:
         raise ValueError(f"Unknown retrieval mode '{mode}'. Use one of {MODES}.")
     allowed = set(allowed_sources) if allowed_sources else None
+    ranges = _normalize_page_ranges(page_ranges)
 
     if mode == "dense":
-        hits = _dense_ranked(question, k, db_dir, allowed)
+        hits = _dense_ranked(question, k, db_dir, allowed, ranges)
         for h in hits:
             h["score"] = h["dense_score"]
         return hits[:k]
 
     # hybrid / hybrid_rerank: fuse dense and BM25 candidate lists.
-    dense = _dense_ranked(question, FUSE_CANDIDATES, db_dir, allowed)
-    bm25_hits = _bm25_ranked(question, FUSE_CANDIDATES, db_dir, allowed)
+    dense = _dense_ranked(question, FUSE_CANDIDATES, db_dir, allowed, ranges)
+    bm25_hits = _bm25_ranked(question, FUSE_CANDIDATES, db_dir, allowed, ranges)
     fused = _rrf_fuse(dense, bm25_hits)[:FUSE_CANDIDATES]
     if not fused:
         return []
@@ -334,10 +449,12 @@ def retrieve(
     return top
 
 
-def best_dense_score(question: str, db_dir: str = DB_DIR, allowed_sources: list[str] | None = None) -> float:
+def best_dense_score(question: str, db_dir: str = DB_DIR, allowed_sources: list[str] | None = None,
+                     page_ranges: dict[str, tuple[int, int]] | None = None) -> float:
     """Cosine similarity of the best dense match — the mode-independent
     relevance signal used by the gate in generate.py."""
-    hits = _dense_ranked(question, 1, db_dir, set(allowed_sources) if allowed_sources else None)
+    hits = _dense_ranked(question, 1, db_dir, set(allowed_sources) if allowed_sources else None,
+                         _normalize_page_ranges(page_ranges))
     return hits[0]["dense_score"] if hits else 0.0
 
 
@@ -357,11 +474,13 @@ def retrieve_multi(
     db_dir: str = DB_DIR,
     files: list[str] | None = None,
     return_parents: bool = True,
+    page_ranges: dict[str, tuple[int, int]] | list[tuple[str, int, int]] | None = None,
 ) -> tuple[list[dict], set[int]]:
     """Retrieve evidence for each sub-query separately, then merge.
 
-    Per sub-query: the existing single-query pipeline (same mode/file filter),
-    then the mode-independent relevance gate (dense cosine >= MIN_SCORE).
+    Per sub-query: the existing single-query pipeline (same mode/file filter,
+    same page-range filter), then the mode-independent relevance gate (dense
+    cosine >= MIN_SCORE).
     A sub-query with no hit above the gate is unsupported (its index is left
     out of the returned `supported` set) instead of failing the question.
 
@@ -387,7 +506,7 @@ def retrieve_multi(
         # sharing a parent).
         hits = retrieve(subqueries[0], k=top_k, db_dir=db_dir, mode=mode,
                         allowed_sources=list(allowed) if allowed else None,
-                        return_parents=return_parents)
+                        return_parents=return_parents, page_ranges=page_ranges)
         for h in hits:
             h["subquery_index"] = 0
             h["subquery_indices"] = [0]
@@ -397,7 +516,7 @@ def retrieve_multi(
     for i, q in enumerate(subqueries):
         hits = retrieve(q, k=top_k, db_dir=db_dir, mode=mode,
                         allowed_sources=list(allowed) if allowed else None,
-                        return_parents=return_parents)
+                        return_parents=return_parents, page_ranges=page_ranges)
         # Gate per sub-query: mode-independent dense cosine.
         kept = [h for h in hits if h.get("dense_score", 0.0) >= MIN_SCORE]
         for h in kept:
@@ -488,7 +607,18 @@ if __name__ == "__main__":
     parser.add_argument("question", nargs="+")
     parser.add_argument("--mode", choices=MODES, default=DEFAULT_MODE)
     parser.add_argument("-k", type=int, default=TOP_K)
+    parser.add_argument("--pages", action="append", default=[],
+                        help="per-file page range, e.g. --pages 'Unit3.pdf:10-35' "
+                             "(inclusive, repeatable)")
     args = parser.parse_args()
-    for hit in retrieve(" ".join(args.question), k=args.k, mode=args.mode):
-        print(f"\n[{hit['source']} p.{hit['page']}  score={hit['score']:.2f}]")
+    try:
+        ranges = parse_page_specs(args.pages)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    for hit in retrieve(" ".join(args.question), k=args.k, mode=args.mode, page_ranges=ranges):
+        page = f"p.{hit['page']}"
+        if hit["source"] in ranges:
+            s, e = ranges[hit["source"]]
+            page += f" (in {s}-{e})"
+        print(f"\n[{hit['source']} {page}  score={hit['score']:.2f}]")
         print(hit["text"][:400] + ("..." if len(hit["text"]) > 400 else ""))
