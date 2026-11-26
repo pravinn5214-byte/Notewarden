@@ -38,3 +38,5 @@ Same 45 questions run against both stores (eval_chroma_db_120 vs eval_chroma_db_
 | MRR | hybrid_rerank | 3 | 0.878 | 0.911 | +0.033 | [-0.033, +0.096] | no |
 | hit@k | hybrid_rerank | 5 | 45/45 (1.000) | 45/45 (1.000) | +0.000 | [+0.000, +0.000] | no |
 | MRR | hybrid_rerank | 5 | 0.888 | 0.911 | +0.023 | [-0.040, +0.083] | no |
+
+Note: `CHUNKING=window_titled` (nearest heading prefix on fixed window chunks, no boundary change) was also tested as a confound check and showed no gain over `window` (paired 95% CIs on all modes/k included 0).
