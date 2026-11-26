@@ -284,6 +284,8 @@ with st.sidebar:
                         except Exception:
                             pass  # collection didn't exist yet
                     reset_client()
+                    release_write_lock(lock)
+                    lock = None
                     files, total = ingest_pdfs(use_ocr=True)
                     invalidate_bm25_cache()
                     _refresh_collections()
