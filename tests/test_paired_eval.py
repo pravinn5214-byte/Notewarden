@@ -54,7 +54,9 @@ def test_run_paired_rows_exclude_zero_only_when_ci_signs_differ(monkeypatch, tmp
     lines = evaluate.run_paired("db_win", "db_head", "heading")
     # 4-question gain out of 45: diff 0.089; the 1000-resample bootstrap
     # (seed 42) gives a CI that excludes zero for this synthetic pattern.
-    assert lines[-1] == ("| dense | 3 | 40/45 (0.889) | 44/45 (0.978) "
+    assert lines[-2] == ("| hit@k | dense | 3 | 40/45 (0.889) | 44/45 (0.978) "
+                         "| +0.089 | [+0.022, +0.178] | yes |")
+    assert lines[-1] == ("| MRR | dense | 3 | 0.552 | 0.641 "
                          "| +0.089 | [+0.022, +0.178] | yes |")
 
 

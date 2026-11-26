@@ -129,37 +129,71 @@ def paired_bootstrap_ci(diffs: list[int], n: int = BOOTSTRAP_N,
 def run_paired(base_db: str = PAIRED_BASE_DB,
                treated_db: str = PAIRED_TREATED_DB,
                treated_label: str = PAIRED_TREATED_LABEL) -> list[str]:
-    """--paired: per-question hit@k difference (treated − window) with paired
-    bootstrap CIs, per mode/k. Both stores must already be ingested (run
-    evaluate.py with EVAL_DB_DIR set to each) and contain the same files."""
+    """--paired: per-question hit@k AND MRR difference (treated − window) with
+    paired bootstrap CIs, per mode/k. Both stores must already be ingested (run
+    evaluate.py with EVAL_DB_DIR set to each) and contain the same files.
+
+    Two metric rows per mode/k are reported:
+      hit@k  — binary 1/0 for any rank in top-k (easy to interpret; loses
+               rank-within-k signal)
+      MRR    — mean reciprocal rank (1/rank, same metric as the main table's
+               "overall hit/MRR" column; preserves rank signal)
+
+    The main table header says "hit/MRR" but the values are MRR (reciprocal
+    ranks averaged). The paired table reports both so the two are directly
+    comparable.
+    """
     questions = load_questions()
     lines = [
-        f"## Paired bootstrap: {treated_label} − window (per-question hit@k)",
+        f"## Paired bootstrap: {treated_label} − window (per-question difference)",
         "",
         f"Same {len(questions)} questions run against both stores "
         f"({base_db} vs {treated_db}), retrieval only. Each row bootstraps the "
         f"mean per-question difference ({treated_label} − window) with "
         f"{BOOTSTRAP_N} resamples, seed {BOOTSTRAP_SEED} — paired, so question "
-        'difficulty cancels out. "Hits" = questions with the expected '
-        "(source, page) in the top k.",
+        "difficulty cancels out.",
         "",
-        "| mode | k | window hits | " + treated_label + " hits | diff | 95% CI | excludes 0 |",
-        "|---|---|---|---|---|---|---|",
+        "**Metric definitions:**",
+        "- `hit@k` — binary (1 if the expected (source, page) appears anywhere in top-k, else 0).",
+        "  This is NOT the same as the main table's MRR values.",
+        "- `MRR` — reciprocal rank (1/rank); 1.0 = rank-1 hit, 0.5 = rank-2, 0 = miss.",
+        "  This IS the same metric the main table's \"overall hit/MRR\" column reports.",
+        "",
+        "| metric | mode | k | window | " + treated_label + " | diff | 95% CI | excludes 0 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for mode in MODES:
         for k in KS:
-            w = [1.0 if r > 0 else 0.0
-                 for r in evaluate_mode(questions, mode, k, base_db)["overall"]]
-            t = [1.0 if r > 0 else 0.0
-                 for r in evaluate_mode(questions, mode, k, treated_db)["overall"]]
-            diffs = [b - a for a, b in zip(w, t)]
-            lo, hi = paired_bootstrap_ci(diffs)
-            row = (f"| {mode} | {k} | {sum(w):.0f}/{len(w)} ({sum(w)/len(w):.3f}) "
-                   f"| {sum(t):.0f}/{len(t)} ({sum(t)/len(t):.3f}) "
-                   f"| {sum(diffs)/len(diffs):+.3f} | [{lo:+.3f}, {hi:+.3f}] "
-                   f"| {'yes' if lo > 0 or hi < 0 else 'no'} |")
-            lines.append(row)
-            print(f"  {mode:>14} k={k}: {row}")
+            rr_w = evaluate_mode(questions, mode, k, base_db)["overall"]
+            rr_t = evaluate_mode(questions, mode, k, treated_db)["overall"]
+
+            # --- hit@k (binary) ---
+            hw = [1.0 if r > 0 else 0.0 for r in rr_w]
+            ht = [1.0 if r > 0 else 0.0 for r in rr_t]
+            diffs_h = [b - a for a, b in zip(hw, ht)]
+            lo_h, hi_h = paired_bootstrap_ci(diffs_h)
+            hit_row = (f"| hit@k | {mode} | {k} | "
+                       f"{sum(hw):.0f}/{len(hw)} ({sum(hw)/len(hw):.3f}) "
+                       f"| {sum(ht):.0f}/{len(ht)} ({sum(ht)/len(ht):.3f}) "
+                       f"| {sum(diffs_h)/len(diffs_h):+.3f} "
+                       f"| [{lo_h:+.3f}, {hi_h:+.3f}] "
+                       f"| {'yes' if lo_h > 0 or hi_h < 0 else 'no'} |")
+            lines.append(hit_row)
+            print(f"  hit@k {mode:>14} k={k}: diff={sum(diffs_h)/len(diffs_h):+.3f} CI=[{lo_h:+.3f},{hi_h:+.3f}]")
+
+            # --- MRR (reciprocal rank — same as main table) ---
+            diffs_m = [b - a for a, b in zip(rr_w, rr_t)]
+            lo_m, hi_m = paired_bootstrap_ci(diffs_m)
+            mrr_w = sum(rr_w) / len(rr_w)
+            mrr_t = sum(rr_t) / len(rr_t)
+            mrr_row = (f"| MRR | {mode} | {k} | "
+                       f"{mrr_w:.3f} "
+                       f"| {mrr_t:.3f} "
+                       f"| {sum(diffs_m)/len(diffs_m):+.3f} "
+                       f"| [{lo_m:+.3f}, {hi_m:+.3f}] "
+                       f"| {'yes' if lo_m > 0 or hi_m < 0 else 'no'} |")
+            lines.append(mrr_row)
+            print(f"   MRR  {mode:>14} k={k}: diff={sum(diffs_m)/len(diffs_m):+.3f} CI=[{lo_m:+.3f},{hi_m:+.3f}]")
     return lines
 
 
@@ -346,7 +380,7 @@ def main() -> None:
             "",
             "Values: mean [bootstrap 95% CI]. CI overlap ⇒ not significant.",
             "",
-            "| mode | k | overall hit/MRR | keyword | semantic |",
+            "| mode | k | overall MRR | keyword MRR | semantic MRR |",
             "|---|---|---|---|---|",
         ]
         for mode, k, rr in rows:
