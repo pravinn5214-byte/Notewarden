@@ -289,6 +289,8 @@ with st.sidebar:
                     files, total = ingest_pdfs(use_ocr=True)
                     invalidate_bm25_cache()
                     _refresh_collections()
+                    from suggested import clear_cache as _clear_suggested_cache
+                    _clear_suggested_cache()
                     st.success(f"Index repaired: {files} file(s), {total} child chunks.")
                 except LockHeldError:
                     st.warning("The app (or another ingest) is running; stop it first.")
@@ -303,6 +305,32 @@ with st.sidebar:
     provider = os.environ.get("LLM_PROVIDER", "claude")
     st.caption(f"LLM provider: **{provider}**"
                + (f" ({os.environ.get('OLLAMA_MODEL', OLLAMA_DEFAULT_MODEL)})" if provider == "ollama" else ""))
+
+    # Suggested questions: one exam-style question per section, cached in SQLite.
+    with st.expander("💡 Suggested questions", expanded=False):
+        if not selected:
+            st.caption("Select at least one file to see suggested questions.")
+        else:
+            from suggested import confidence_band, get_or_generate_suggestions
+            force_refresh = st.button("🔄 Refresh", key="refresh_suggested", use_container_width=True)
+            suggestions, sug_err = get_or_generate_suggestions(
+                [p.name for p in selected],
+                db_dir=DB_DIR,
+                page_ranges=page_ranges or None,
+                force=force_refresh,
+            )
+            if sug_err:
+                st.caption(sug_err)
+            if not suggestions:
+                if not sug_err:
+                    st.caption("No sections found for the current selection.")
+            else:
+                for idx, s in enumerate(suggestions):
+                    band = confidence_band(s["confidence"])
+                    label = f"[{band} {s['confidence']:.2f}] {s['question']} ({s['file']} p.{s['page']})"
+                    if st.button(label, key=f"sug_q_{idx}", use_container_width=True):
+                        st.session_state["pending_prompt"] = s["question"]
+                        st.rerun()
 
     # Query log: the 10 weakest recent queries, to spot retrieval gaps.
     with st.expander("🔍 Query log", expanded=False):
@@ -397,7 +425,8 @@ for msg in st.session_state.messages:
         if msg.get("sources"):
             _render_sources(msg["sources"], msg.get("subqueries"), msg.get("supported"))
 
-if question := st.chat_input("Ask about your notes...", disabled=bool(blockers)):
+typed_question = st.chat_input("Ask about your notes...", disabled=bool(blockers))
+if question := (st.session_state.pop("pending_prompt", None) or typed_question):
     import time as _time
     _plain_turn_start = _time.monotonic()
     st.session_state.messages.append({"role": "user", "text": question})
