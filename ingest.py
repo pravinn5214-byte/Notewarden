@@ -47,23 +47,31 @@ CHILD_OVERLAP = 20
 PARENT_SIZE = 500  # words per parent chunk (page-aware)
 
 # --- Chunking mode --------------------------------------------------------------
-# CHUNKING=window  (default) fixed word windows — the original behaviour.
-# CHUNKING=heading split each page at its detected headings, so a chunk never
-#                  crosses a section boundary; sections get `section` metadata.
+# CHUNKING=window        (default) fixed word windows — the original behaviour.
+# CHUNKING=heading       split each page at its detected headings, so a chunk
+#                        never crosses a section boundary; sections get
+#                        `section` metadata.
+# CHUNKING=window_titled EXPERIMENT: window boundaries unchanged, but the
+#                        nearest preceding heading is prepended to each child
+#                        chunk's text (embedded/BM25 only). Isolates the
+#                        title-prefix effect from the boundary effect.
 # Read per ingest run (not at import) so the app, CLI and tests can switch
 # modes without re-importing; unknown values fall back to window.
 CHUNKING_WINDOW = "window"
 CHUNKING_HEADING = "heading"
+CHUNKING_WINDOW_TITLED = "window_titled"
 DEFAULT_CHUNKING = CHUNKING_WINDOW
+_MODES = (CHUNKING_WINDOW, CHUNKING_HEADING, CHUNKING_WINDOW_TITLED)
 # Short mode tag baked into every chunk ID so switching modes can never leave
 # a stale chunk that looks live (and repair/re-ingest swaps cleanly).
-_ID_MODE = {CHUNKING_WINDOW: "win", CHUNKING_HEADING: "head"}
+_ID_MODE = {CHUNKING_WINDOW: "win", CHUNKING_HEADING: "head",
+            CHUNKING_WINDOW_TITLED: "wint"}
 
 
 def chunking_mode() -> str:
-    """The active chunking mode ('window' or 'heading')."""
+    """The active chunking mode ('window', 'heading' or 'window_titled')."""
     mode = (os.environ.get("CHUNKING", "") or DEFAULT_CHUNKING).strip().lower()
-    return mode if mode in (CHUNKING_WINDOW, CHUNKING_HEADING) else DEFAULT_CHUNKING
+    return mode if mode in _MODES else DEFAULT_CHUNKING
 
 
 def _normalize_chunking(value: str | None) -> str:
@@ -71,7 +79,7 @@ def _normalize_chunking(value: str | None) -> str:
     if value is None:
         return chunking_mode()
     value = value.strip().lower()
-    return value if value in (CHUNKING_WINDOW, CHUNKING_HEADING) else DEFAULT_CHUNKING
+    return value if value in _MODES else DEFAULT_CHUNKING
 
 # Below this many non-whitespace chars, a page counts as scanned (no text
 # layer) and gets OCR'd instead. Overridable via OCR_MIN_CHARS in .env.
@@ -396,17 +404,18 @@ def load_headings(pdf_path: Path) -> dict[int, list[str]]:
     return out
 
 
-def split_sections(page_text: str, headings: list[str] | None
-                   ) -> list[tuple[str | None, str]]:
-    """Split a page's cleaned text at its headings.
+def _heading_marks(page_text: str, headings: list[str] | None
+                   ) -> list[tuple[int, str]]:
+    """Usable heading positions (char offset, title) inside a page's text.
 
-    Returns [(section_title | None, section_text), ...] where section_text
-    starts at its heading (so the title is already inside it). A heading that
-    cleaning moved/removed is skipped, and a page with no usable heading comes
-    back as one untitled section — i.e. exactly the window chunking.
+    Each heading is located via clean_text (a heading cleaning moved/removed
+    is skipped), then a heading followed almost immediately by the next one is
+    dropped as a boundary — it is a table/list label, not a section (its words
+    stay in the text). Shared by split_sections (heading mode) and
+    plan_window_titled (experimental), so both modes see the same marks.
     """
     if not headings:
-        return [(None, page_text)]
+        return []
     marks: list[tuple[int, str]] = []
     cursor = 0
     for h in headings:
@@ -418,8 +427,6 @@ def split_sections(page_text: str, headings: list[str] | None
             continue
         marks.append((idx, h))
         cursor = idx + len(h)
-    if not marks:
-        return [(None, page_text)]
     # A heading followed (almost) immediately by the next one is a label in a
     # table/list, not a section — e.g. the "Phase | Phase Name | Phase 1"
     # header cells of a checklist table. Drop it as a boundary only; its words
@@ -431,7 +438,21 @@ def split_sections(page_text: str, headings: list[str] | None
             if len(between.split()) < 3:
                 continue
         kept.append((start, title))
-    marks = kept
+    return kept
+
+
+def split_sections(page_text: str, headings: list[str] | None
+                   ) -> list[tuple[str | None, str]]:
+    """Split a page's cleaned text at its headings.
+
+    Returns [(section_title | None, section_text), ...] where section_text
+    starts at its heading (so the title is already inside it). A heading that
+    cleaning moved/removed is skipped, and a page with no usable heading comes
+    back as one untitled section — i.e. exactly the window chunking.
+    """
+    if not headings:
+        return [(None, page_text)]
+    marks = _heading_marks(page_text, headings)
     if not marks:
         return [(None, page_text)]
     sections: list[tuple[str | None, str]] = []
@@ -511,6 +532,40 @@ def plan_page_chunks(page_text: str, headings: list[str] | None,
     return parents, children
 
 
+def plan_window_titled(page_text: str, headings: list[str] | None,
+                       child_size: int = CHILD_SIZE,
+                       child_overlap: int = CHILD_OVERLAP,
+                       parent_size: int = PARENT_SIZE,
+                       ) -> tuple[list[tuple[str, str | None, int]],
+                                  list[tuple[str, str | None, int]]]:
+    """EXPERIMENT (CHUNKING=window_titled): window boundaries, titled text.
+
+    Parents and children are cut exactly like window mode (same word offsets,
+    parents keep the raw window text), but each child's embedded/BM25 text is
+    prefixed with the nearest heading at or before the chunk's first word via
+    _with_section — so retrieval differences vs window isolate the title
+    prefix alone. `section` stays None (the prefix is a text trick, not a
+    structural section), and a chunk before the first heading gets no prefix.
+    """
+    parents = [(ptxt, None, j * parent_size)
+               for j, ptxt in enumerate(chunk_words_page(page_text, parent_size))]
+    # Heading char offset -> word offset in the same split() space chunk_words
+    # uses, so "nearest preceding heading" is a word-offset comparison.
+    mark_words = [(len(page_text[:idx].split()), title)
+                  for idx, title in _heading_marks(page_text, headings)]
+    children: list[tuple[str, str | None, int]] = []
+    for i, ctxt in enumerate(chunk_words(page_text, child_size, child_overlap)):
+        start_word = i * (child_size - child_overlap)
+        title = None
+        for mw, t in mark_words:          # marks are in page order
+            if mw <= start_word:
+                title = t
+            else:
+                break
+        children.append((_with_section(title, ctxt), None, start_word))
+    return parents, children
+
+
 def _parent_index_for(start_word: int, parent_starts: list[int]) -> int:
     """Index of the parent window containing `start_word` (last one that has
     started at or before it). For contiguous window mode this is exactly the
@@ -545,11 +600,13 @@ def ingest_pdfs(
     so deselected files stop contributing to answers.
     Returns (files_processed, child_chunks_stored).
 
-    chunking: 'window' (default) or 'heading'; None reads the CHUNKING env
-    var. Heading mode splits pages at detected headings (see plan_page_chunks)
-    and stamps `chunking`/`section` into every chunk's metadata; because the
-    mode is part of each chunk ID, re-ingesting under another mode replaces
-    the old mode's chunks instead of mixing them.
+    chunking: 'window' (default), 'heading' or 'window_titled' (experimental);
+    None reads the CHUNKING env var. Heading mode splits pages at detected
+    headings (see plan_page_chunks) and stamps `chunking`/`section` into every
+    chunk's metadata; window_titled keeps window boundaries and only prefixes
+    child text with the nearest heading (no `section`); because the mode is
+    part of each chunk ID, re-ingesting under another mode replaces the old
+    mode's chunks instead of mixing them.
 
     Image files (.png/.jpg/.jpeg) are treated as 1-page documents and OCR'd.
     For PDFs, only pages with less than OCR_MIN_CHARS of extracted text are
@@ -645,10 +702,10 @@ def ingest_pdfs(
             progress_cb(f"Reading {doc_path.name}...")
         file_chunks = 0
         page_headings: dict[int, list[str]] = {}
-        if mode == CHUNKING_HEADING and doc_path.suffix.lower() not in IMAGE_EXTENSIONS:
-            # Heading mode: detect per-page section headings from the PDF's
-            # font/structure info. Pages with no text layer (OCR'd) or with no
-            # usable headings are simply missing here -> window fallback.
+        if mode in (CHUNKING_HEADING, CHUNKING_WINDOW_TITLED) and doc_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            # Heading-aware modes: detect per-page section headings from the
+            # PDF's font/structure info. Pages with no text layer (OCR'd) or
+            # with no usable headings are simply missing here -> window fallback.
             page_headings = load_headings(doc_path)
         if doc_path.suffix.lower() in IMAGE_EXTENSIONS:
             # An image upload is a 1-page document; it only has pixels, so
@@ -672,10 +729,16 @@ def ingest_pdfs(
         for page_num, page_text in page_texts:
             # Parents and children for this page. Window mode cuts fixed word
             # windows over the page; heading mode cuts them per section (see
-            # plan_page_chunks), so a chunk never crosses a heading.
+            # plan_page_chunks), so a chunk never crosses a heading;
+            # window_titled cuts the same windows as window mode but prefixes
+            # each child with its nearest preceding heading.
             headings = page_headings.get(page_num, [])
-            page_parents, page_children = plan_page_chunks(
-                page_text, headings, child_size, child_overlap, parent_size)
+            if mode == CHUNKING_WINDOW_TITLED:
+                page_parents, page_children = plan_window_titled(
+                    page_text, headings, child_size, child_overlap, parent_size)
+            else:
+                page_parents, page_children = plan_page_chunks(
+                    page_text, headings, child_size, child_overlap, parent_size)
             page_parent_ids = []
             parent_starts = []
             for j, (ptxt, _section, start_word) in enumerate(page_parents):
