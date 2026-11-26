@@ -102,6 +102,79 @@ def evaluate_mode(questions: list[dict], mode: str, k: int, db_dir: str) -> dict
 
 MULTITOPIC_FILE = Path("eval_multitopic.json")
 
+# --paired: which stores to diff and where the table lands. Defaults match the
+# eval runs that produced eval_results_heading.md (window vs heading, size 120).
+PAIRED_BASE_DB = "eval_chroma_db_120"
+PAIRED_TREATED_DB = "eval_chroma_db_heading_120"
+PAIRED_TREATED_LABEL = "heading"
+PAIRED_RESULTS_FILE = Path("eval_results_heading.md")
+
+
+def paired_bootstrap_ci(diffs: list[int], n: int = BOOTSTRAP_N,
+                        seed: int = BOOTSTRAP_SEED) -> tuple[float, float]:
+    """95% CI of the mean of per-question differences, via the same bootstrap
+    percentile convention as bootstrap_ci (same n/seed → comparable widths)."""
+    if not diffs:
+        return (0.0, 0.0)
+    rng = random.Random(seed)
+    m = len(diffs)
+    means = []
+    for _ in range(n):
+        sample = [rng.choice(diffs) for _ in range(m)]
+        means.append(sum(sample) / m)
+    means.sort()
+    return means[int(0.025 * n)], means[int(0.975 * n) - 1]
+
+
+def run_paired(base_db: str = PAIRED_BASE_DB,
+               treated_db: str = PAIRED_TREATED_DB,
+               treated_label: str = PAIRED_TREATED_LABEL) -> list[str]:
+    """--paired: per-question hit@k difference (treated − window) with paired
+    bootstrap CIs, per mode/k. Both stores must already be ingested (run
+    evaluate.py with EVAL_DB_DIR set to each) and contain the same files."""
+    questions = load_questions()
+    lines = [
+        f"## Paired bootstrap: {treated_label} − window (per-question hit@k)",
+        "",
+        f"Same {len(questions)} questions run against both stores "
+        f"({base_db} vs {treated_db}), retrieval only. Each row bootstraps the "
+        f"mean per-question difference ({treated_label} − window) with "
+        f"{BOOTSTRAP_N} resamples, seed {BOOTSTRAP_SEED} — paired, so question "
+        'difficulty cancels out. "Hits" = questions with the expected '
+        "(source, page) in the top k.",
+        "",
+        "| mode | k | window hits | " + treated_label + " hits | diff | 95% CI | excludes 0 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for mode in MODES:
+        for k in KS:
+            w = [1.0 if r > 0 else 0.0
+                 for r in evaluate_mode(questions, mode, k, base_db)["overall"]]
+            t = [1.0 if r > 0 else 0.0
+                 for r in evaluate_mode(questions, mode, k, treated_db)["overall"]]
+            diffs = [b - a for a, b in zip(w, t)]
+            lo, hi = paired_bootstrap_ci(diffs)
+            row = (f"| {mode} | {k} | {sum(w):.0f}/{len(w)} ({sum(w)/len(w):.3f}) "
+                   f"| {sum(t):.0f}/{len(t)} ({sum(t)/len(t):.3f}) "
+                   f"| {sum(diffs)/len(diffs):+.3f} | [{lo:+.3f}, {hi:+.3f}] "
+                   f"| {'yes' if lo > 0 or hi < 0 else 'no'} |")
+            lines.append(row)
+            print(f"  {mode:>14} k={k}: {row}")
+    return lines
+
+
+def _save_paired(lines: list[str], path: Path = PAIRED_RESULTS_FILE) -> None:
+    """Replace everything from the '## Paired bootstrap' heading on (or append
+    when the file has no such section yet)."""
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    marker = "## Paired bootstrap"
+    if marker in text:
+        text = text[:text.index(marker)] + "\n".join(lines) + "\n"
+    else:
+        text = text.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n" if text \
+            else "\n".join(lines) + "\n"
+    path.write_text(text, encoding="utf-8")
+
 
 def both_covered(hits: list[dict], topics: list[dict], k: int) -> bool:
     """True when every topic's keyword appears in a hit from its expected
@@ -240,6 +313,11 @@ def main() -> None:
     if "--agent" in sys.argv:
         sizes = [int(a) for a in args] or [CHILD_SIZE]
         run_agent(sizes, write="--write" in sys.argv)
+        return
+    if "--paired" in sys.argv:
+        # Window vs treated (default heading) per-question hit difference with
+        # paired bootstrap CIs. Stores must already be ingested.
+        _save_paired(run_paired())
         return
     if "--multitopic" in sys.argv:
         sizes = [int(a) for a in args] or [CHILD_SIZE]
