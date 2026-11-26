@@ -17,7 +17,7 @@ import ingest  # noqa: E402
 from ingest import (  # noqa: E402
     CHUNKING_HEADING, CHUNKING_WINDOW, _chunk_id, _line_is_heading,
     _normalize_chunking, _with_section, chunking_mode, detect_page_headings,
-    ingest_pdfs, plan_page_chunks, plan_window_titled, split_sections,
+    ingest_pdfs, plan_page_chunks, split_sections,
 )
 
 # --- Mode selection ------------------------------------------------------------
@@ -194,48 +194,6 @@ def test_with_section_prepends_only_when_missing():
     assert _with_section("Sec", "Sec already first") == "Sec already first"
     assert _with_section("Q?", "answer") == "Q? answer"
     assert _with_section(None, "text") == "text"
-
-
-# --- window_titled (experimental) -----------------------------------------------
-
-def test_window_titled_boundaries_identical_to_window():
-    """window_titled must cut exactly the windows window mode cuts — same
-    parent texts, same child word offsets — so an eval against window mode
-    isolates the title prefix alone. Only child text may differ (a prefix),
-    parents stay raw and `section` metadata stays empty."""
-    parents_w, children_w = plan_page_chunks(PAGE, None, 6, 2, 10)
-    parents_t, children_t = plan_window_titled(PAGE, ["Alpha Section"], 6, 2, 10)
-    assert [t for t, _, _ in parents_t] == [t for t, _, _ in parents_w]
-    assert [s for _, _, s in parents_t] == [s for _, _, s in parents_w]
-    assert [s for _, _, s in children_t] == [s for _, _, s in children_w]
-    prefixed = 0
-    for (tw, _, _), (tt, sec, _) in zip(children_w, children_t):
-        assert tt == tw or tt.endswith(tw)   # at most a title prefix added
-        assert sec is None                   # section metadata stays empty
-        prefixed += tt != tw
-    assert prefixed, "expected at least one child to get the title prefix"
-
-
-def test_window_titled_prefixes_nearest_preceding_heading():
-    # 30 lead words, then Alpha (words 30-31) + 150, then Beta + 150 = 334.
-    lead = " ".join(f"w{i}" for i in range(30))
-    alpha = " ".join(f"a{i}" for i in range(150))
-    beta = " ".join(f"b{i}" for i in range(150))
-    text = f"{lead} Alpha Section {alpha} Beta Section {beta}"
-    _parents, children = plan_window_titled(
-        text, ["Alpha Section", "Beta Section"])
-    # size 120, overlap 20 -> window starts 0, 100, 200, 300 (334 words).
-    assert len(children) == 4
-    texts = [t for t, _, _ in children]
-    # Before the first heading there is no title to prepend.
-    assert texts[0] == " ".join(text.split()[:120])
-    # Nearest heading at or before each window's FIRST word decides the prefix:
-    # start 100 -> Alpha (word 30); starts 200/300 -> Beta (word 182), even
-    # though window 1 also contains the Beta heading further in.
-    assert texts[1].startswith("Alpha Section: ")
-    assert texts[2].startswith("Beta Section: ")
-    assert texts[3].startswith("Beta Section: ")
-    assert all(sec is None for _, sec, _ in children)
 
 
 # --- IDs -----------------------------------------------------------------------

@@ -11,7 +11,7 @@ eval_chroma_db*/
 eval_results.md
 ocr_cache/
 .pytest_cache/
-eval_chroma_db*/
-logs
+logs/
 tests/_test_query_log/
+tests/_test_chroma_db*/
 eval_*.log
