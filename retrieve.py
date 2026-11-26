@@ -260,13 +260,15 @@ def _dense_ranked(question: str, k: int, db_dir: str, allowed: set[str] | None,
     """
     collection, _ = _get_resources(db_dir)
     ranges = _normalize_page_ranges(page_ranges)
-    n = min(k * 5, with_index_recovery(collection.count))
+    n = min(k * 5, with_index_recovery(
+        collection.count, refetch=lambda: _get_resources(db_dir)[0].count()))
     query_vec = _get_embedder().encode([question]).tolist()
 
     def _run(col: chromadb.Collection, where) -> dict:
         return with_index_recovery(
             lambda: col.query(query_embeddings=query_vec, n_results=max(1, n), where=where),
-            refetch=lambda: col.query(query_embeddings=query_vec, n_results=max(1, n), where=where))
+            refetch=lambda: _get_resources(db_dir)[0].query(
+                query_embeddings=query_vec, n_results=max(1, n), where=where))
 
     parts = _page_where_parts(allowed, ranges, db_dir)
     merged: list[tuple[float, str, str, dict]] = []

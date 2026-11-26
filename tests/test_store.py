@@ -223,3 +223,29 @@ def test_repair_index_rebuilds_same_count(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(store, "db_path", lambda: real_store)
         reset_client()
+
+
+def test_explicit_db_dir_client_recovers_on_stale_index(tmp_path):
+    """reset_client() must drop explicit db_dir clients (not just _default_path),
+    so with_index_recovery reopens eval/non-default stores instead of reusing
+    the stale client."""
+    import chromadb
+    explicit_db = str(tmp_path / "eval_like_db")
+    c1 = store.get_client(explicit_db)
+    col1 = c1.get_or_create_collection("notes")
+    col1.add(ids=["id1"], documents=["hello"], metadatas=[{"source": "a.pdf", "page": 1}])
+
+    # Simulate a stale client handle failing once with an HNSW error; the
+    # refetch re-resolves via get_client(explicit_db) after reset_client().
+    calls = {"n": 0}
+
+    def run_with_stale():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise chromadb.errors.InternalError("Error creating hnsw segment reader")
+        return store.get_client(explicit_db)
+
+    c2 = with_index_recovery(run_with_stale, refetch=run_with_stale)
+    assert c2 is not c1, "reset_client() must drop explicit db_dir from _clients"
+    assert c2.get_collection("notes").count() == 1
+    reset_client()

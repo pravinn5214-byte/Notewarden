@@ -64,11 +64,20 @@ def get_collections(db_dir: str | None = None) -> tuple[chromadb.Collection, chr
     return client.get_collection(COLLECTION), client.get_collection(PARENT_COLLECTION)
 
 
-def reset_client() -> None:
-    """Drop the cached default client so the next get_client() reopens it."""
+def reset_client(db_dir: str | None = None) -> None:
+    """Drop the cached client(s) so the next get_client() reopens them.
+
+    When db_dir is given, only that path is dropped; when None, all cached
+    clients (default and explicit) are dropped so with_index_recovery works
+    for eval/test stores too.
+    """
     global _default_path
-    if _default_path is not None:
-        _clients.pop(_default_path, None)
+    if db_dir is not None:
+        _clients.pop(db_dir, None)
+        if _default_path == db_dir:
+            _default_path = None
+    else:
+        _clients.clear()
         _default_path = None
     for hook in _reset_hooks:
         hook()
